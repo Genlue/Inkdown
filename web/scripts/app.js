@@ -468,7 +468,9 @@ function openQuickSwitcher() {
 }
 
 // 方案 3：纯净流式顶栏 —— 中央面包屑路径 + 大面积窗口拖拽区域
-const topbarBreadcrumb = Capsule({ className: 'c-topbar__breadcrumb' });
+/* 位置由 .c-topbar__lead 决定（展开导航栏时整组右移），
+   胶囊只负责材质和排版 —— 少一个 lead 类，展开时就会和「收起」胶囊叠在一起。 */
+const topbarBreadcrumb = Capsule({ className: 'c-topbar__lead c-topbar__breadcrumb' });
 topbarBreadcrumb.setAttribute('data-no-drag', '');
 const viewCapsule = Capsule({ children: [viewSeg] });
 
