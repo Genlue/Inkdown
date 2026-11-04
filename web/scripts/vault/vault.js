@@ -61,6 +61,7 @@ const DEFAULT_WORKSPACE = {
   sidebar: true,
   view: 'outline',
   split: 0.5,
+  recentsOpen: false,
 };
 
 const isObject = (v) => v && typeof v === 'object' && !Array.isArray(v);

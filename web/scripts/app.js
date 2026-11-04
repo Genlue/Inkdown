@@ -39,6 +39,7 @@ import {
   confirmDialog,
   markNavMoving,
   Badge,
+  Drawer,
 } from './ui/kit.js';
 import { TabManager } from './tabs/tab-manager.js';
 import { ViewHost } from './views/view-host.js';
@@ -103,7 +104,7 @@ const state = {
   selectedDir: '',
   splitRatio: Number(vault.workspace.split) || 0.5,
   recents: Array.isArray(vault.workspace.recents) ? vault.workspace.recents : [],
-  recentsCollapsed: Boolean(vault.workspace.recentsCollapsed),
+  recentsOpen: Boolean(vault.workspace.recentsOpen),
   treeCollapsed: Boolean(vault.workspace.treeCollapsed),
   navHistory: [],
   navIndex: -1,
@@ -785,38 +786,41 @@ listPane.append(listScroll);
 /* ---------------- 最近打开文件卡片 ---------------- */
 
 const recentCount = h('span', { class: 'ink-recent__count' }, '0');
-const recentChevron = h('span', { class: 'ink-recent__chevron' }, iconEl('chevron-down', 11));
 
+// 抽屉里的表头：不折叠，抽屉本身就是开合动作
 const recentHeader = h(
   'div',
-  {
-    class: 'ink-recent__head',
-    title: '点击折叠/展开最近打开',
-    onclick: () => toggleRecentCard(),
-  },
+  { class: 'ink-recent__head' },
   h('span', { class: 'ink-recent__icon' }, iconEl('clock', 13)),
   h('span', { class: 'ink-recent__title' }, '最近打开'),
-  recentCount,
-  h('span', { class: 'l-push' }),
-  recentChevron
+  recentCount
 );
 
 const recentList = h('div', { class: 'ink-recent__list' });
 
-const recentCard = h(
-  'div',
-  { class: 'ink-recent-card' + (state.recentsCollapsed ? ' is-collapsed' : '') },
-  recentHeader,
-  recentList
-);
+/**
+ * 最近打开 = 从列表底部拉出的抽屉。
+ * 收起时只留 30px（一条灰条），不占列表的空间；拉出来才盖住文件树。
+ */
+const recentDrawer = Drawer({
+  side: 'bottom',
+  peek: 54,
+  size: '62%',
+  label: '最近打开',
+  className: 'ink-recent-drawer',
+  open: Boolean(state.recentsOpen),
+  children: [recentHeader, recentList],
+  onOpen: () => {
+    state.recentsOpen = true;
+    vault.patchWorkspace({ recentsOpen: true });
+  },
+  onClose: () => {
+    state.recentsOpen = false;
+    vault.patchWorkspace({ recentsOpen: false });
+  },
+});
 
-listPane.append(recentCard);
-
-function toggleRecentCard() {
-  state.recentsCollapsed = !state.recentsCollapsed;
-  recentCard.classList.toggle('is-collapsed', state.recentsCollapsed);
-  vault.patchWorkspace({ recentsCollapsed: state.recentsCollapsed });
-}
+listPane.append(recentDrawer);
 
 function addRecent(path) {
   if (!path || path.startsWith('.') || state.page === 'trash') return;
@@ -828,7 +832,6 @@ function addRecent(path) {
 function renderRecents() {
   const validRecents = state.recents.filter((p) => vault.noteAt(p));
   recentCount.textContent = String(validRecents.length);
-  recentCard.classList.toggle('is-collapsed', state.recentsCollapsed);
 
   if (!validRecents.length) {
     fill(
