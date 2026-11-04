@@ -3314,6 +3314,8 @@ export function Drawer({
   size = '',
   scrim = false,
   dismissible = true,
+  resizable = true,
+  minSize = 160,
   label = '抽屉',
   children = null,
   className = '',
@@ -3414,12 +3416,18 @@ export function Drawer({
 
   const onDown = (e) => {
     if (e.button !== 0) return;
+    const host = vertical ? root.clientHeight : root.clientWidth;
     drag = {
       id: e.pointerId,
       start: pointOf(e),
       from: progress(),
       lastP: progress(),
       lastT: performance.now(),
+      // 拉开之后继续拖 = 改高度；还没拉开时拖 = 拉开。两个动作共用同一条抓握带。
+      mode: resizable && isOpen ? 'resize' : 'open',
+      size0: extent(),
+      max: Math.max(extent(), host * 0.92),
+      moved: false,
     };
     speed = 0;
     swallowClick = false;
@@ -3430,7 +3438,19 @@ export function Drawer({
 
   const onMove = (e) => {
     if (!drag || e.pointerId !== drag.id) return;
-    const delta = (pointOf(e) - drag.start) * openSign;
+    const travelPx = pointOf(e) - drag.start;
+    if (Math.abs(travelPx) > 3) drag.moved = true;
+
+    const delta = travelPx * openSign;
+
+    if (drag.mode === 'resize') {
+      // 上限按容器算，下限按 minSize —— 但不该把原本更小的面板「撑大」，所以取两者较小
+      const floor = Math.min(minSize, drag.size0);
+      const next = clamp(drag.size0 + delta, floor, drag.max);
+      root.style.setProperty('--dw-size', `${Math.round(next)}px`);
+      return;
+    }
+
     const p = clamp(drag.from + delta / travel(), 0, 1);
     root.style.setProperty('--dw-p', String(p));
 
@@ -3446,15 +3466,34 @@ export function Drawer({
 
   const onUp = (e) => {
     if (!drag || e.pointerId !== drag.id) return;
+    const { mode, size0, moved } = drag;
+    drag = null;
+    delete root.dataset.dragging;
+
+    // 没挪动就是一次点击，交给 click 去切换开合
+    if (!moved) {
+      swallowClick = false;
+      return;
+    }
+
+    swallowClick = true;
+
+    if (mode === 'resize') {
+      const held = extent();
+      if (held <= peekPx + 28) {
+        // 拖到几乎收没了就当是关闭，并且把尺寸还原成拖之前的高度
+        root.style.setProperty('--dw-size', `${Math.round(size0)}px`);
+        setOpen(false);
+        return;
+      }
+      root.dispatchEvent(new CustomEvent('drawer:resize', { bubbles: true, detail: { size: held } }));
+      return;
+    }
+
     const p = progress();
     const flick = Math.abs(speed) > 0.0025;
     // 甩一下按方向走，慢慢拖按过没过中线 —— 两种习惯都要照顾。
-    const next = flick ? speed > 0 : p > 0.4;
-
-    swallowClick = true;
-    drag = null;
-    delete root.dataset.dragging;
-    setOpen(next);
+    setOpen(flick ? speed > 0 : p > 0.4);
   };
 
   grip.addEventListener('pointerdown', onDown);
@@ -3499,4 +3538,84 @@ export function Drawer({
   };
 
   return root;
+}
+
+/* ==========================================================================
+   34. 分隔条
+   —— 栏与栏之间那 9px。拖动改宽度，方向键一步步挪，双击复位。
+
+   刻意只报「位移」不报「宽度」：谁被拖、拖的是哪一栏、上下限是多少，
+   只有调用方知道。控件自己猜宽度，最后一定会猜错（被拖的可能不是相邻兄弟，
+   也可能是被 flex 撑开的、有 min-width 的、或者干脆不是同一个容器里的）。
+   ========================================================================== */
+
+export function Resizer({
+  axis = 'x',
+  label = '调整大小',
+  step = 16,
+  className = '',
+  onDelta,
+  onReset,
+} = {}) {
+  const horizontal = axis === 'y';
+
+  const el = h('div', {
+    class: `c-resizer ${className}`.trim(),
+    role: 'separator',
+    tabindex: '0',
+    'aria-label': label,
+    'aria-orientation': horizontal ? 'horizontal' : 'vertical',
+    dataset: { axis: horizontal ? 'y' : 'x' },
+  });
+
+  let drag = null;
+
+  const point = (e) => (horizontal ? e.clientY : e.clientX);
+
+  const onDown = (e) => {
+    if (e.button !== 0) return;
+    drag = { id: e.pointerId, start: point(e), delta: 0 };
+    el.setPointerCapture(e.pointerId);
+    el.dataset.active = '1';
+    // 拖动期间整页统一光标，鼠标滑出这 9px 也不会变回箭头
+    document.documentElement.dataset.resizing = horizontal ? 'y' : 'x';
+    onDelta?.(0, 'start');
+    e.preventDefault();
+  };
+
+  const onMove = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    drag.delta = point(e) - drag.start;
+    onDelta?.(drag.delta, 'move');
+  };
+
+  const onUp = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const delta = drag.delta;
+    drag = null;
+    delete el.dataset.active;
+    delete document.documentElement.dataset.resizing;
+    onDelta?.(delta, 'end');
+  };
+
+  el.addEventListener('pointerdown', onDown);
+  el.addEventListener('pointermove', onMove);
+  el.addEventListener('pointerup', onUp);
+  el.addEventListener('pointercancel', onUp);
+
+  el.addEventListener('dblclick', (e) => {
+    e.preventDefault();
+    onReset?.();
+  });
+
+  el.addEventListener('keydown', (e) => {
+    const back = horizontal ? 'ArrowUp' : 'ArrowLeft';
+    const fwd = horizontal ? 'ArrowDown' : 'ArrowRight';
+    if (e.key !== back && e.key !== fwd) return;
+    e.preventDefault();
+    onDelta?.(e.key === back ? -step : step, 'key');
+  });
+
+  el.dispose = () => el.remove();
+  return el;
 }

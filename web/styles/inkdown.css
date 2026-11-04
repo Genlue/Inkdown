@@ -1231,6 +1231,8 @@ pre,
    ========================================================================== */
 
 /* 顶栏面包屑路径 */
+/* 面包屑就是一枚胶囊：材质交给 .c-capsule + 玻璃透镜，
+   这里只管排版。不要自己再铺一层背景，否则会把玻璃压成灰板。 */
 .c-topbar__breadcrumb {
   display: flex;
   align-items: center;
@@ -1243,10 +1245,6 @@ pre,
   user-select: none;
   max-width: 50vw;
   overflow: hidden;
-  background: var(--surface-control);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 0.5px solid var(--line-soft);
 }
 
 .c-topbar__crumb-icon {
@@ -2043,4 +2041,31 @@ pre,
     padding-left: 24px;
     padding-right: 24px;
   }
+}
+
+/* ==========================================================================
+   分栏拖拽
+   —— 三根缝都挂在 .ink-split 上（它本身就是定位容器）。
+      视觉只有 1px，命中区 9px；悬停才亮，平时不占画面。
+   ========================================================================== */
+
+.ink-resizer--nav {
+  left: 0;
+  transform: translateX(-50%);
+}
+
+.ink-resizer--list {
+  left: var(--ink-list-w, 284px);
+  transform: translateX(-50%);
+}
+
+.ink-resizer--inspector {
+  right: var(--ink-inspector-w, 280px);
+}
+
+/* 没有那一栏的时候，缝也不该在 */
+.l-app--nav-hidden .ink-resizer--nav,
+.l-app--plain .ink-resizer--nav,
+.ink-split[data-inspector="0"] .ink-resizer--inspector {
+  display: none;
 }

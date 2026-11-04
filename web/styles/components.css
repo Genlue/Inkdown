@@ -4148,11 +4148,8 @@ html[data-focused="0"] .c-nav__item[aria-selected="true"] .c-nav__icon {
     background var(--dur-1) var(--ease-out);
 }
 
-.c-drawer__grip:hover .c-drawer__bar,
-.c-drawer__grip:focus-visible .c-drawer__bar {
-  background: var(--text-quaternary);
-}
-
+/* 悬停只把灰条拉长，不改颜色 —— 抓握带是「这里有东西可以拉」的提示，
+   不是可点按钮，变色会读成「已经被选中」。 */
 .c-drawer__grip:hover .c-drawer__bar {
   width: 44px;
 }
@@ -4208,4 +4205,82 @@ html[data-focused="0"] .c-nav__item[aria-selected="true"] .c-nav__icon {
 
 .c-drawer[data-side="right"] .c-drawer__body {
   padding: 0 var(--s-7) var(--s-7) var(--s-9);
+}
+
+/* ==========================================================================
+   34. 分隔条
+   —— 栏与栏之间那条能拖的缝。命中区 9px，视觉只有中间 1px，
+      平时透明，悬停/拖动才亮一条强调色。
+   ========================================================================== */
+
+.c-resizer {
+  position: absolute;
+  z-index: 6;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.c-resizer[data-axis="x"] {
+  top: 0;
+  bottom: 0;
+  width: 9px;
+  cursor: col-resize;
+}
+
+.c-resizer[data-axis="y"] {
+  left: 0;
+  right: 0;
+  height: 9px;
+  cursor: row-resize;
+}
+
+.c-resizer::after {
+  content: "";
+  position: absolute;
+  background: transparent;
+  transition: background var(--dur-1) var(--ease-out);
+}
+
+.c-resizer[data-axis="x"]::after {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-0.5px);
+}
+
+.c-resizer[data-axis="y"]::after {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-0.5px);
+}
+
+.c-resizer:hover::after,
+.c-resizer[data-active="1"]::after {
+  background: var(--accent-ring);
+}
+
+.c-resizer:focus-visible {
+  outline: none;
+}
+
+.c-resizer:focus-visible::after {
+  background: var(--accent);
+}
+
+/* 拖动期间整页统一光标，鼠标滑出命中区也不会变回箭头 */
+html[data-resizing="x"],
+html[data-resizing="x"] * {
+  cursor: col-resize !important;
+}
+
+html[data-resizing="y"],
+html[data-resizing="y"] * {
+  cursor: row-resize !important;
+}
+
+html[data-resizing] {
+  user-select: none;
 }

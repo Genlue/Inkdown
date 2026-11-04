@@ -40,6 +40,8 @@ import {
   markNavMoving,
   Badge,
   Drawer,
+  Resizer,
+  TopVeil,
 } from './ui/kit.js';
 import { TabManager } from './tabs/tab-manager.js';
 import { ViewHost } from './views/view-host.js';
@@ -466,7 +468,8 @@ function openQuickSwitcher() {
 }
 
 // 方案 3：纯净流式顶栏 —— 中央面包屑路径 + 大面积窗口拖拽区域
-const topbarBreadcrumb = h('div', { class: 'c-topbar__lead c-topbar__breadcrumb', 'data-no-drag': '' });
+const topbarBreadcrumb = Capsule({ className: 'c-topbar__breadcrumb' });
+topbarBreadcrumb.setAttribute('data-no-drag', '');
 const viewCapsule = Capsule({ children: [viewSeg] });
 
 topbar.append(
@@ -1589,6 +1592,20 @@ const noteView = h(
 );
 
 docPane.append(noteView, emptyHost);
+
+/* 内容区顶部的渐进模糊：只糊滚进固定区的内容，不糊胶囊。 */
+const docVeil = TopVeil();
+docVeil.dataset.on = '0';
+noteView.append(docVeil);
+
+function syncDocVeil() {
+  const scroller = state.mode === 'preview' ? previewScroll : editorScroll;
+  const on = state.currentView === 'note' && Boolean(scroller) && scroller.scrollTop > 2;
+  docVeil.dataset.on = on ? '1' : '0';
+}
+
+editorScroll.addEventListener('scroll', syncDocVeil, { passive: true });
+previewScroll.addEventListener('scroll', syncDocVeil, { passive: true });
 
 const viewHost = new ViewHost({
   container: docPane,
@@ -3106,6 +3123,7 @@ function setMode(v) {
   vault.patchWorkspace({ mode: v });
   syncDocHead();
   resizeEditor();
+  syncDocVeil();
 }
 
 function caretLineTop(ta, offset) {
@@ -3348,6 +3366,79 @@ globalThis.inkdown = {
 
   toast,
 };
+
+/* ---------------- 分栏拖拽 ----------------
+   三根缝：导航栏 ↔ 文件列表、文件列表 ↔ 正文、正文 ↔ 右侧栏。
+   拖动只改 CSS 变量（宽度都从变量来），松手才写回 workspace。 */
+
+const splitRoot = listPane.parentElement;
+const rootStyle = document.documentElement.style;
+const clampPx = (v, min, max) => Math.min(Math.max(v, min), max);
+
+/* 导航栏 */
+let navBase = 0;
+const navResizer = Resizer({
+  axis: 'x',
+  label: '调整导航栏宽度',
+  className: 'ink-resizer ink-resizer--nav',
+  onDelta(dx, phase) {
+    if (phase === 'start' || phase === 'key') navBase = side.getBoundingClientRect().width;
+    const next = clampPx(navBase + dx, 176, 360);
+    app.style.setProperty('--nav-w', `${Math.round(next)}px`);
+    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ navWidth: Math.round(next) });
+  },
+  onReset() {
+    app.style.removeProperty('--nav-w');
+    vault.patchWorkspace({ navWidth: 0 });
+  },
+});
+
+/* 文件列表 */
+let listBase = 0;
+const listResizer = Resizer({
+  axis: 'x',
+  label: '调整文件列表宽度',
+  className: 'ink-resizer ink-resizer--list',
+  onDelta(dx, phase) {
+    if (phase === 'start' || phase === 'key') listBase = listPane.getBoundingClientRect().width;
+    const next = clampPx(listBase + dx, 200, 520);
+    rootStyle.setProperty('--ink-list-w', `${Math.round(next)}px`);
+    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ listWidth: Math.round(next) });
+  },
+  onReset() {
+    rootStyle.removeProperty('--ink-list-w');
+    vault.patchWorkspace({ listWidth: 0 });
+  },
+});
+
+/* 右侧栏 */
+let inspectorBase = 0;
+const inspectorResizer = Resizer({
+  axis: 'x',
+  label: '调整右侧栏宽度',
+  className: 'ink-resizer ink-resizer--inspector',
+  onDelta(dx, phase) {
+    if (phase === 'start' || phase === 'key') inspectorBase = sidebar.getBoundingClientRect().width;
+    // 往左拖变宽，所以取负
+    const next = clampPx(inspectorBase - dx, 220, 460);
+    rootStyle.setProperty('--ink-inspector-w', `${Math.round(next)}px`);
+    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ inspectorWidth: Math.round(next) });
+  },
+  onReset() {
+    rootStyle.removeProperty('--ink-inspector-w');
+    vault.patchWorkspace({ inspectorWidth: 0 });
+  },
+});
+
+splitRoot.append(navResizer, listResizer, inspectorResizer);
+
+// 上次会话的栏宽
+const savedLayout = vault.workspace;
+if (savedLayout.navWidth > 0) app.style.setProperty('--nav-w', `${savedLayout.navWidth}px`);
+if (savedLayout.listWidth > 0) rootStyle.setProperty('--ink-list-w', `${savedLayout.listWidth}px`);
+if (savedLayout.inspectorWidth > 0) {
+  rootStyle.setProperty('--ink-inspector-w', `${savedLayout.inspectorWidth}px`);
+}
 
 /* ---------------- 首次渲染 ---------------- */
 
