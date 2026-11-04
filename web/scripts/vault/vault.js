@@ -36,6 +36,7 @@ import {
   getFileType,
 } from './fs.js';
 import { seedNotes, SEED_FOLDERS } from './seed.js';
+import { snippetAround } from './links.js';
 
 const META_PATH = '.inkdown/vault.json';
 const SETTINGS_PATH = '.inkdown/settings.json';
@@ -449,20 +450,33 @@ export class Vault {
     return mtime;
   }
 
-  async search(query) {
+  /**
+   * 全文搜索。
+   * 逐篇 await 会让桌面端的 IPC 往返串成一条长队，所以按批并发读；
+   * 命中后顺带截一段上下文，列表里就不用只显示路径了。
+   */
+  async search(query, limit = 60) {
     const q = String(query ?? '').trim().toLowerCase();
     if (!q) return [];
 
+    const notes = this.flatNotes();
     const hits = [];
-    for (const note of this.flatNotes()) {
-      if (note.title.toLowerCase().includes(q)) {
-        hits.push(note);
-        continue;
-      }
-      const text = await this.readNote(note.path);
-      if (text.toLowerCase().includes(q)) hits.push(note);
-      if (hits.length >= 60) break;
+    const BATCH = 24;
+
+    for (let i = 0; i < notes.length && hits.length < limit; i += BATCH) {
+      const batch = notes.slice(i, i + BATCH);
+      const contents = await Promise.all(batch.map((note) => this.readNote(note.path)));
+
+      batch.forEach((note, k) => {
+        if (hits.length >= limit) return;
+        const text = contents[k] || '';
+        const titleHit = note.title.toLowerCase().includes(q);
+        const at = text.toLowerCase().indexOf(q);
+        if (!titleHit && at < 0) return;
+        hits.push({ ...note, snippet: at >= 0 ? snippetAround(text, q) : '' });
+      });
     }
+
     return hits.sort((a, b) => b.mtime - a.mtime);
   }
 

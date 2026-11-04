@@ -399,6 +399,18 @@ html[data-backdrop="system"] .l-app {
   box-shadow: none;
 }
 
+/* 桌面端一律贴边。
+   窗口本身没有装饰，10px 内缩露出来的是不透明壁纸渐变 —— 在浏览器里像
+   "浮动卡片"，在真实窗口里就是一圈彩色包边。所以桌面端不给这圈留位置，
+   浮动卡片的观感只保留在浏览器预览。
+   壁纸层保留（不 display:none）：贴边之后它整幅铺在应用底下，
+   玻璃材质照样有东西可以采样，只是不再从缝里漏出来。 */
+html[data-desktop="1"] .l-app {
+  inset: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 /* 系统材质模式下，材质由 OS 提供：这里不能再画任何一层，
    否则就是「OS acrylic + 自绘 acrylic」叠成一块灰板。 */
 html[data-backdrop="system"] .l-nav,

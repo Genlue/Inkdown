@@ -6,12 +6,14 @@
 
    设计取舍：
    - 不做 HTML 直通。所有文本先转义，避免把笔记里的 <script> 当标签渲染。
+   - 代码块交给 core/highlight.js 做离线高亮；未知语言直接转义。
    - 输出的是字符串，交给 innerHTML；调用方负责容器。
    ========================================================================== */
 
+import { highlight, normalizeLang } from './core/highlight.js';
+
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ESCAPES[c]);
-
 /** 拦掉会执行脚本的协议。图片允许 data:image。 */
 function safeUrl(url, { image = false } = {}) {
   const u = String(url).trim();
@@ -263,8 +265,9 @@ function renderBlocks(lines, offset = 0) {
       }
       i++; // 跳过闭合围栏
       const label = lang ? `<span class="md-code__lang">${escapeHtml(lang)}</span>` : '<span class="md-code__lang">TEXT</span>';
+      const code = highlight(buf.join('\n'), lang);
       out.push(
-        `<div class="md-code"><div class="md-code__header">${label}<button type="button" class="md-code__copy" aria-label="复制代码" title="复制代码">复制</button></div><pre><code>${escapeHtml(buf.join('\n'))}</code></pre></div>`
+        `<div class="md-code"><div class="md-code__header">${label}<button type="button" class="md-code__copy" aria-label="复制代码" title="复制代码">复制</button></div><pre><code${lang ? ` data-lang="${escapeHtml(normalizeLang(lang) || lang)}"` : ''}>${code}</code></pre></div>`
       );
       continue;
     }

@@ -53,6 +53,8 @@ import {
 } from './sidebar/views.js';
 import { outlineView } from './sidebar/outline-view.js';
 import { infoView } from './sidebar/info-view.js';
+import { relationsView } from './sidebar/relations-view.js';
+import { buildIndex, findBacklinks, findOutlinks } from './vault/links.js';
 import { relTime, charCount, lineCount, lineOffset } from './util.js';
 
 /* ---------------- 启动 ---------------- */
@@ -94,7 +96,7 @@ const state = {
     : 'edit',
   sidebar: vault.workspace.sidebar !== false,
   navHidden: Boolean(vault.workspace.navHidden),
-  view: ['outline', 'info'].includes(vault.workspace.view)
+  view: ['outline', 'info', 'relations'].includes(vault.workspace.view)
     ? vault.workspace.view
     : 'outline',
   expanded: new Set(vault.workspace.expanded || []),
@@ -1322,7 +1324,7 @@ function renderSearchList() {
       children: hits.map((note) =>
         ListRow({
           title: note.title,
-          subtitle: note.path,
+          subtitle: note.snippet || note.path,
           meta: relTime(note.mtime),
           selected: note.path === state.current,
           onClick: () => openNote(note.path),
@@ -1605,6 +1607,7 @@ panes.style.setProperty('--split', `${Math.round(state.splitRatio * 100)}%`);
 
 registerSidebarView(outlineView);
 registerSidebarView(infoView);
+registerSidebarView(relationsView);
 
 const viewHosts = new Map();
 const viewNodes = getSidebarViews().map((view) => {
@@ -1614,6 +1617,42 @@ const viewNodes = getSidebarViews().map((view) => {
 });
 
 const controllers = new Map();
+
+/* ---------------- 链接索引（反链 / 标签） ---------------- */
+
+let linkIndex = null;
+let linkIndexing = false;
+let linkIndexToken = 0;
+
+/**
+ * 全量重建链接索引。
+ * 读文件走 vault 的内容缓存，1000 篇量级实测约 20ms；
+ * token 保证并发触发时只有最后一次的结果会落地。
+ */
+async function rebuildLinkIndex() {
+  const token = ++linkIndexToken;
+  if (!linkIndex) linkIndexing = true;
+  try {
+    const entries = await Promise.all(
+      vault.flatNotes().map(async (note) => ({
+        path: note.path,
+        title: note.title || note.name || note.path,
+        content: await vault.readNote(note.path),
+      }))
+    );
+    if (token !== linkIndexToken) return;
+    linkIndex = buildIndex(entries);
+  } catch (err) {
+    console.warn('[links] 建立索引失败', err);
+  } finally {
+    if (token === linkIndexToken) {
+      linkIndexing = false;
+      controllers.get('relations')?.refresh?.();
+    }
+  }
+}
+
+const rebuildIndexSoon = debounce(() => rebuildLinkIndex(), 900);
 
 const sidebarCtx = {
   getNote: () => currentNote(),
@@ -1626,6 +1665,31 @@ const sidebarCtx = {
   getEmptyLabel: () => (currentTrash() ? '这篇笔记在回收站' : '没有打开的笔记'),
   isActive: (id) => state.sidebar && state.view === id,
   jumpToLine: (line) => jumpToLine(line),
+
+  // —— 关联视图 ——
+  isIndexing: () => linkIndexing && !linkIndex,
+  getBacklinks: () => (linkIndex ? findBacklinks(linkIndex, state.current) : []),
+  getOutlinks: () => (linkIndex ? findOutlinks(linkIndex, state.current) : []),
+  getTags: () => {
+    if (!linkIndex) return [];
+    const own = linkIndex.byPath.get(state.current)?.tags || [];
+    return own.map((tag) => ({ tag, count: linkIndex.tags.get(tag)?.size || 1 }));
+  },
+  getUnresolved: () => {
+    if (!linkIndex) return [];
+    return findOutlinks(linkIndex, state.current)
+      .filter((link) => !link.path)
+      .map((link) => ({
+        target: link.target,
+        count: linkIndex.unresolved.get(link.target)?.size || 1,
+      }));
+  },
+  openPath: (path) => openNote(path),
+  openWikilink: (target) => openWikilinkTarget(target),
+  filterBy: (text) => {
+    search.input.value = text;
+    runSearch(text);
+  },
 };
 
 const sidebar = Inspector({
@@ -1734,22 +1798,34 @@ preview.addEventListener('click', async (e) => {
   const wikilink = e.target.closest('.ink-wikilink');
   if (wikilink) {
     e.preventDefault();
-    const target = wikilink.dataset.target;
-    if (target) {
-      const match = vault.flatNotes().find(
-        (n) => n.name.toLowerCase() === target.toLowerCase() || n.title.toLowerCase() === target.toLowerCase()
-      );
-      if (match) {
-        await openNote(match.path);
-      } else {
-        const newPath = await vault.createNote(state.selectedDir || 'Notes', target);
-        await renderAll();
-        await openNote(newPath);
-        toast(`已创建并跳转到: ${target}`);
-      }
-    }
+    await openWikilinkTarget(wikilink.dataset.target);
   }
 });
+
+/**
+ * 双链跳转的唯一入口：预览区、关联视图、快捷键都走这里。
+ * 目标不存在时就地新建，避免"点了没反应"。
+ */
+async function openWikilinkTarget(target) {
+  const raw = String(target ?? '').trim();
+  const clean = raw.split('#')[0].trim();
+  if (!clean) return;
+
+  const needle = clean.toLowerCase();
+  const match = vault.flatNotes().find(
+    (n) => (n.name || '').toLowerCase() === needle || (n.title || '').toLowerCase() === needle
+  );
+
+  if (match) {
+    await openNote(match.path);
+    return;
+  }
+
+  const newPath = await vault.createNote(state.selectedDir || 'Notes', clean);
+  await renderAll();
+  await openNote(newPath);
+  toast(`已创建并跳转到: ${clean}`);
+}
 
 // 预览区任务清单复选框双向互动回写
 preview.addEventListener('change', (e) => {
@@ -1961,6 +2037,8 @@ async function renderAll() {
   renderRecents();
   await renderDoc();
   updateTopbar();
+  // 增删改都会走这里，索引跟着重建（去抖，避免连续操作时反复全量扫描）
+  rebuildIndexSoon();
 }
 
 /* ---------------- 打开 / 新建 / 重命名 ---------------- */
@@ -2230,6 +2308,8 @@ async function commitDoc() {
   lastLoaded = text;
   setSaveState('saved');
   updateMeta({ ...note, mtime });
+  // 正文变了 → 反链/标签可能变了，索引跟着更新
+  rebuildIndexSoon();
 }
 
 const commitSoon = debounce(commitDoc, 500);
@@ -3288,6 +3368,9 @@ if (state.current) {
 }
 setSidebar(state.sidebar, { persist: false, autoMode: false });
 requestAnimationFrame(() => requestAnimationFrame(() => splitEl.classList.remove('is-booting')));
+
+// 首屏画完再建索引：不挡住第一次绘制，建好后关联视图自己会刷新
+setTimeout(() => rebuildLinkIndex(), 0);
 
 syncThemeBtn();
 

@@ -6,6 +6,8 @@
 const WELCOME = [
   '# 欢迎使用 Inkdown',
   '',
+  '标签：#入门 #产品/Inkdown',
+  '',
   'Inkdown 是一个本地优先的 Markdown 笔记应用：左边是文件树，中间写，右边看。',
   '',
   '## 从这三件事开始',
@@ -57,6 +59,10 @@ const WELCOME = [
 const CHEATSHEET = [
   '# Markdown 语法速查',
   '',
+  '标签：#语法 #Markdown',
+  '',
+  '> 相关：[[欢迎使用 Inkdown]]',
+  '',
   '## 标题',
   '',
   '```',
@@ -103,6 +109,8 @@ const CHEATSHEET = [
 
 const MEETING = [
   '# 周会纪要 · 11 月 3 日',
+  '',
+  '标签：#产品/会议',
   '',
   '**参会**：产品、设计、前端、客户端',
   '',

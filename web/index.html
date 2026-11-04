@@ -5,9 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="icon" href="./assets/inkdown.png" />
   <script>
-    // 桌面端：先把窗口模式挂上，避免首帧看到方角壁纸
+    // 桌面端：先把窗口模式挂上，避免首帧看到方角壁纸、以及窗口边缘漏出壁纸形成"包边"
     if (window.__TAURI__ && window.__TAURI__.core) {
       document.documentElement.dataset.desktop = '1';
+      document.documentElement.dataset.backdrop = 'system';
     }
     window.addEventListener('error', function(e) {
       console.error(e);

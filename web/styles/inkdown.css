@@ -1842,3 +1842,233 @@ pre,
 .ink-wiki-popup__item.is-selected {
   background: var(--fill-active, rgba(255, 255, 255, 0.14));
 }
+
+/* ==========================================================================
+   代码高亮
+   —— token 类名由 core/highlight.js 产出，这里只负责上色。
+      两套色板各自成组，改主题不用动配色逻辑。
+   ========================================================================== */
+
+.md-code {
+  --tok-com: #8a8f98;
+  --tok-str: #1a7f37;
+  --tok-num: #b35c00;
+  --tok-kw: #a626a4;
+  --tok-fn: #0550ae;
+  --tok-type: #9a6700;
+  --tok-var: #1d1d1f;
+  --tok-op: #6e6e73;
+  --tok-tag: #116329;
+  --tok-attr: #0550ae;
+  --tok-key: #0550ae;
+  --tok-bool: #b35c00;
+  --tok-regex: #0a7d6b;
+  --tok-add: #1a7f37;
+  --tok-del: #c0392b;
+}
+
+[data-theme="dark"] .md-code {
+  --tok-com: #6b7278;
+  --tok-str: #98c379;
+  --tok-num: #d19a66;
+  --tok-kw: #c678dd;
+  --tok-fn: #61afef;
+  --tok-type: #e5c07b;
+  --tok-var: #e6e6e6;
+  --tok-op: #9aa0a6;
+  --tok-tag: #e06c75;
+  --tok-attr: #d19a66;
+  --tok-key: #61afef;
+  --tok-bool: #d19a66;
+  --tok-regex: #56b6c2;
+  --tok-add: #98c379;
+  --tok-del: #e06c75;
+}
+
+.md-code .tok-com { color: var(--tok-com); font-style: italic; }
+.md-code .tok-str { color: var(--tok-str); }
+.md-code .tok-num { color: var(--tok-num); }
+.md-code .tok-kw { color: var(--tok-kw); }
+.md-code .tok-fn { color: var(--tok-fn); }
+.md-code .tok-type { color: var(--tok-type); }
+.md-code .tok-var { color: var(--tok-var); }
+.md-code .tok-op { color: var(--tok-op); }
+.md-code .tok-tag { color: var(--tok-tag); }
+.md-code .tok-attr { color: var(--tok-attr); }
+.md-code .tok-key { color: var(--tok-key); }
+.md-code .tok-bool { color: var(--tok-bool); font-weight: 500; }
+.md-code .tok-regex { color: var(--tok-regex); }
+.md-code .tok-add { color: var(--tok-add); }
+.md-code .tok-del { color: var(--tok-del); }
+
+/* ==========================================================================
+   关联视图（反链 / 出链 / 标签）
+   ========================================================================== */
+
+.ink-rel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 6px 2px 20px;
+}
+
+.ink-rel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.ink-rel__label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+
+.ink-rel__count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--surface-control);
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.ink-rel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ink-rel__row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.ink-rel__row:hover {
+  background: var(--surface-hover);
+}
+
+.ink-rel__row-title,
+.ink-rel__row-sub {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ink-rel__row-title {
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+.ink-rel__row-sub {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+
+.ink-rel__row.is-dangling .ink-rel__row-title {
+  color: var(--accent);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.ink-rel__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ink-rel__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 0.5px solid var(--line-soft);
+  border-radius: 999px;
+  background: var(--surface-control);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.ink-rel__tag:hover {
+  background: var(--surface-control-hover);
+  color: var(--text-primary);
+}
+
+.ink-rel__tag-count {
+  color: var(--text-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+
+.ink-rel__empty,
+.ink-rel__hint {
+  padding: 2px 8px 4px;
+  font-size: 11.5px;
+  color: var(--text-quaternary);
+}
+
+/* ==========================================================================
+   窄栏自适应
+   —— 侧栏展开 + 分栏预览时，正文列可能只剩两百多像素。此时：
+      ① 标题行允许换行，工具按钮掉到第二行，标题不再被挤成几个像素；
+      ② 分栏从左右排改成上下叠，每栏都能拿到整个宽度。
+      用容器查询而不是媒体查询：窗口宽不等于正文列宽。
+   ========================================================================== */
+
+.ink-doc {
+  container-type: inline-size;
+  container-name: docpane;
+}
+
+.ink-doc__row {
+  flex-wrap: wrap;
+}
+
+.ink-title {
+  min-width: 6em;
+}
+
+@container docpane (max-width: 760px) {
+  .ink-panes[data-mode="split"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .ink-panes[data-mode="split"] > .ink-divider {
+    display: none;
+  }
+
+  .ink-panes[data-mode="split"] .ink-pane--edit {
+    border-bottom: 0.5px solid var(--line-soft);
+  }
+
+  .ink-doc__head,
+  .ink-editor-scroll,
+  .ink-preview-scroll {
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+
+  .ink-title {
+    font-size: 21px;
+  }
+
+  .md-body {
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+}
