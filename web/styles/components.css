@@ -2010,7 +2010,12 @@ html[data-focused="0"] .c-nav__item[aria-selected="true"] .c-nav__icon {
 .c-topbar__lead {
   display: flex;
   align-items: center;
-  gap: var(--s-3);
+  /* 组内胶囊之间也必须是 --topbar-gap（16），不是收紧过的 6。
+     顶栏只有一套横向节奏：红绿灯↔开关、开关↔标题组、**胶囊↔胶囊**，全是 16。
+     这里曾经写死 var(--s-3)=6，因为标题组长期只有一枚胶囊所以没人发现；
+     一旦放两枚（比如「文件树」开关 + 面包屑），两枚胶囊就会贴在一起，
+     读起来像一组分段控件，而不是两个并列的胶囊。 */
+  gap: var(--topbar-gap, var(--s-7));
   flex: 0 1 auto;
   min-width: 0;
   height: var(--capsule-h, 34px);
