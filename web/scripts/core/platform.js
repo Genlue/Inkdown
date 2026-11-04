@@ -84,11 +84,16 @@ export async function setTitlebarMode(mode) {
  * 只切 CSS 不切窗口主题，深色界面下系统材质还是浅色 —— 导航栏透明，
  * 透出来的就是那块白磨砂。这也是「深色模式导航栏发白」的唯一原因。
  *
+ * `'system'` 必须原样传下去（Rust 侧转成 set_theme(None)）。以前这里把
+ * 任何值都折成 light/dark，窗口主题就被钉死了；而 WebView2 的
+ * prefers-color-scheme 跟着窗口主题走，于是「自动」读到的是自己造成的假值，
+ * 系统再深也切不过去。
+ *
  * Windows 换主题后已下发的材质未必跟着重染，所以补一次 set_effects。
  */
 export async function setWindowTheme(mode) {
   if (!isDesktop) return false;
-  const theme = mode === 'dark' ? 'dark' : 'light';
+  const theme = mode === 'dark' ? 'dark' : mode === 'light' ? 'light' : 'system';
   try {
     await invoke('window_set_theme', { theme });
     if (currentBackdrop() === 'system') {
@@ -102,6 +107,44 @@ export async function setWindowTheme(mode) {
   } catch (e) {
     console.warn('[platform] window theme failed', e);
     return false;
+  }
+}
+
+/**
+ * 系统当前明暗。
+ *
+ * 只在窗口主题**交还系统之后**读才有意义 —— 那时它返回 OS 的真实偏好。
+ * 这比 webview 里的 prefers-color-scheme 可靠：后者会被窗口主题改写，
+ * 也解释不了「手动切过浅色以后，自动就一直是浅色」。
+ * 读不到时返回 null，由 theme.js 退回 prefers-color-scheme。
+ */
+export async function systemTheme() {
+  if (!isDesktop) return null;
+  try {
+    const t = await invoke('window_get_theme');
+    return t === 'dark' || t === 'light' ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 系统主题变化（Windows 设置里切深色、macOS 切外观）。
+ * 监听窗口事件而不是 window.theme()：后者要额外申请 window 权限，
+ * 而事件通道在 core:default 里已经放开了。
+ * @returns {Promise<() => void>} 取消订阅
+ */
+export async function onSystemThemeChange(fn) {
+  if (!isDesktop) return () => {};
+  try {
+    const listen = globalThis.__TAURI__?.event?.listen;
+    const un = await listen?.('tauri://theme-changed', (event) => {
+      const value = typeof event.payload === 'string' ? event.payload : event.payload?.theme;
+      if (value === 'dark' || value === 'light') fn(value);
+    });
+    return typeof un === 'function' ? un : () => {};
+  } catch {
+    return () => {};
   }
 }
 

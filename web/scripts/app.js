@@ -14,10 +14,16 @@
 
 import { h, fill, debounce } from './core/dom.js';
 import { icon, iconEl } from './core/icons.js';
-import { theme } from './core/theme.js';
+import { theme, setSystemTheme } from './core/theme.js';
 import { mountGlassSurfaces } from './core/glass-lens.js';
 import { revealOnScroll } from './core/scrollbar.js';
-import { isDesktop, setSidebarBackdrop, setWindowTheme } from './core/platform.js';
+import {
+  isDesktop,
+  setSidebarBackdrop,
+  setWindowTheme,
+  systemTheme,
+  onSystemThemeChange,
+} from './core/platform.js';
 
 /** Tauri v2 的窗口 API；比直接 invoke 插件命令稳，不用自己传窗口 label */
 const tauriWindow = () => globalThis.__TAURI__?.window?.getCurrentWindow?.();
@@ -261,26 +267,36 @@ const viewSeg = Segmented({
   onChange: (v) => setMode(v),
 });
 
-const themeBtn = IconButton({ icon: 'moon', label: '切换到深色' });
-function syncThemeBtn() {
-  const dark = theme.resolved === 'dark';
-  fill(themeBtn, iconEl(dark ? 'sun' : 'moon', 16));
-  const label = dark ? '切换到浅色' : '切换到深色';
-  themeBtn.title = label;
-  themeBtn.setAttribute('aria-label', label);
+/**
+ * 把 CSS 主题同步给窗口，并把「自动」需要的系统值取回来。
+ *
+ * 顺序是这条逻辑的全部重点：先 set_theme(None) 把窗口主题交还系统，
+ * 再读窗口主题 —— 得到的才是 OS 的真实偏好。反过来先读后交还，
+ * 读到的是上一次手动钉死的值，「自动」就永远不生效。
+ *
+ * want 不变就不重复往返：订阅会在每次 notify 时调到这里，
+ * 而 setSystemTheme 又会触发一次 notify。
+ */
+let syncedWindowTheme = '';
+async function syncWindowTheme() {
+  const want = theme.mode === 'system' ? 'system' : theme.resolved;
+  if (want === syncedWindowTheme) return;
+  syncedWindowTheme = want;
+  await setWindowTheme(want);
+  if (want === 'system') setSystemTheme(await systemTheme());
 }
-themeBtn.addEventListener('click', () => {
-  theme.setMode(theme.resolved === 'dark' ? 'light' : 'dark');
-  syncThemeBtn();
-});
 
 theme.subscribe(() => {
-  syncThemeBtn();
-  // 系统材质（DWM Acrylic）按窗口主题染色，必须跟着 CSS 主题一起切
-  setWindowTheme(theme.resolved);
+  // DWM Acrylic 按窗口主题染色，必须跟着 CSS 主题一起切
+  syncWindowTheme();
   emitPluginEvent('theme:change', { mode: theme.resolved, accent: theme.accent });
   if (applyingTheme) return;
   vault.patchSettings({ appearance: { mode: theme.mode, accent: theme.accent } });
+});
+
+// 系统在设置里切换明暗时，只有「自动」需要跟着走
+onSystemThemeChange((t) => {
+  if (theme.mode === 'system') setSystemTheme(t);
 });
 
 const inspectorBtn = IconButton({
@@ -593,7 +609,6 @@ topbar.append(
     navHistoryCapsule,
     quickSwitcherCapsule,
     viewCapsule,
-    Capsule({ round: true, children: themeBtn }),
     Capsule({ round: true, children: inspectorBtn })
   )
 );
@@ -1968,9 +1983,6 @@ const viewHost = new ViewHost({
   vault,
   onFontChange: (area, fontName) => {
     applyFonts(vault.settings.fonts || {});
-  },
-  onThemeChange: () => {
-    syncThemeBtn();
   },
   onPickFolder: () => pickFolder(),
   onOpenInExplorer: (p) => openInExplorer(p),
@@ -4035,8 +4047,6 @@ setTimeout(() => {
   pluginHost.init().catch((err) => console.warn('[plugins] 初始化失败', err));
 }, 0);
 
-syncThemeBtn();
-
 if (vault.workspace.navHidden) {
   app.classList.add('l-app--nav-hidden');
   const label = '展开导航栏';
@@ -4048,7 +4058,7 @@ if (vault.workspace.navHidden) {
 const initialBackdrop = vault.settings.appearance?.backdrop || 'system';
 // 先定窗口主题，再下发材质：DWM 按调用当下的窗口主题取色，
 // 顺序反了第一帧会是浅色材质，深色界面上一闪一块白。
-setWindowTheme(theme.resolved).finally(() => setSidebarBackdrop(initialBackdrop).catch(() => {}));
+syncWindowTheme().finally(() => setSidebarBackdrop(initialBackdrop).catch(() => {}));
 
 mountGlassSurfaces();
 
@@ -4321,13 +4331,12 @@ function handleGlobalContextMenu(e) {
       { sep: true },
       { label: '偏好设置…', icon: 'sliders', onClick: () => openSettingsTab() },
       {
-        label: theme.mode === 'dark' ? '切换浅色模式' : '切换深色模式',
-        icon: theme.mode === 'dark' ? 'sun' : 'moon',
+        label: theme.resolved === 'dark' ? '切换浅色模式' : '切换深色模式',
+        icon: theme.resolved === 'dark' ? 'sun' : 'moon',
         onClick: () => {
-          const next = theme.mode === 'dark' ? 'light' : 'dark';
+          const next = theme.resolved === 'dark' ? 'light' : 'dark';
           theme.setMode(next);
           vault.patchSettings({ appearance: { mode: next, accent: theme.accent } });
-          syncThemeBtn();
         },
       },
     ],

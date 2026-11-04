@@ -633,12 +633,27 @@ fn window_set_titlebar(window: WebviewWindow, mode: String) -> Result<(), String
 /// 不设这一条，深色界面下系统材质仍然是浅色，导航栏会白得像一块纸。
 #[tauri::command]
 fn window_set_theme(window: WebviewWindow, theme: String) -> Result<(), String> {
-    let t = match theme.as_str() {
-        "dark" => tauri::Theme::Dark,
-        "light" => tauri::Theme::Light,
-        _ => return Ok(()),
-    };
-    window.set_theme(Some(t)).map_err(|e| e.to_string())
+    // "system" 必须交还 None。留着上一次的 Light/Dark 会把 WebView2 的
+    // prefers-color-scheme 一起钉死 —— 「自动」于是永远停在手动选过的那一档，
+    // 系统明明是深色也换不过来。窗口主题同时也是 DWM Acrylic 的染色依据，
+    // 所以它必须和 CSS 主题表达同一件事：跟随系统，或者明确的一档。
+    match theme.as_str() {
+        "dark" => window.set_theme(Some(tauri::Theme::Dark)),
+        "light" => window.set_theme(Some(tauri::Theme::Light)),
+        _ => window.set_theme(None),
+    }
+    .map_err(|e| e.to_string())
+}
+
+/// 当前窗口主题。窗口主题交还系统（set_theme(None)）之后，这里返回的就是
+/// OS 的真实偏好 —— 前端用它来决定「自动」到底该是明还是暗。
+/// 读不到时返回 None，由前端退回 prefers-color-scheme。
+#[tauri::command]
+fn window_get_theme(window: WebviewWindow) -> Option<String> {
+    window.theme().ok().map(|t| match t {
+        tauri::Theme::Dark => "dark".to_string(),
+        _ => "light".to_string(),
+    })
 }
 
 /// 真实系统材质入口（Windows DWM Acrylic / Mica / Blur）
@@ -1046,6 +1061,7 @@ pub fn run() {
             open_url,
             window_set_titlebar,
             window_set_theme,
+            window_get_theme,
             window_set_effect,
             ai_stream,
             ai_cancel
