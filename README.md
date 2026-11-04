@@ -105,7 +105,7 @@ npm run check        # 静态自检（语法 / CSS 括号与注释 / 版本一�
 
 **笔记与仓库**
 
-- 一个文件夹 = 一个仓库，首次启动可自选目录；笔记是普通 Markdown，配置在 `.inkdown/`
+- 一个文件夹 = 一个仓库；首次启动自动初始化 `Documents/Inkdown Vault`，设置里可切换其它文件夹
 - 文件树四档层级样式：连续引导线 / 彩虹色块 / 简约框 / 无（设置里可切换）
 - 实时文件监听：在资源管理器里增删改，应用内即时同步；编辑器有未保存改动时**不覆盖**，挂提示条让你选
 - 手动刷新（列表按钮 / `Ctrl+Alt+R` / 窗口重新获焦）兜底
@@ -212,14 +212,14 @@ ESM 求值后无法真正卸载，所以「禁用」的确切语义是**撤销�
 │  ├─ settings.json     外观、编辑器偏好
 │  ├─ workspace.json    展开状态、栏宽、最近打开
 │  ├─ index.json        标题/摘要索引缓存
-│  ├─ trash/            回收站
+│  ├─ trash.json        回收站索引
 │  ├─ plugins.json      插件启用与授权记录
 │  └─ plugins/<id>/     插件本体与 data.json
 └─ .trash/
 ```
 
 全部是明文 JSON/Markdown。**笔记不加密**，AI 插件的 API Key 也以明文存在
-`.inkdown/plugins/ai/data.json` —— 别把这个仓库同步到公开位置。
+`.inkdown/plugins/ai/data.json` —— 别把笔记仓库同步到公开位置。
 
 ---
 
