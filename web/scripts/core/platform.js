@@ -1,5 +1,5 @@
 // ============================================================
-// Lumina · Platform
+// Inkdown · Platform
 // 与宿主环境的唯一接触面：Tauri 窗口能力。浏览器预览时全部安全降级。
 // ============================================================
 
@@ -72,6 +72,36 @@ export async function setTitlebarMode(mode) {
     await invoke('window_set_titlebar', { mode });
   } catch (e) {
     console.warn('[platform] titlebar mode failed', e);
+  }
+}
+
+/* ---------------- 窗口主题 ---------------- */
+
+/**
+ * 把 CSS 主题同步给窗口。
+ *
+ * DWM 的 Acrylic / Mica 是**窗口主题**染的色，不认 CSS 的 data-theme。
+ * 只切 CSS 不切窗口主题，深色界面下系统材质还是浅色 —— 导航栏透明，
+ * 透出来的就是那块白磨砂。这也是「深色模式导航栏发白」的唯一原因。
+ *
+ * Windows 换主题后已下发的材质未必跟着重染，所以补一次 set_effects。
+ */
+export async function setWindowTheme(mode) {
+  if (!isDesktop) return false;
+  const theme = mode === 'dark' ? 'dark' : 'light';
+  try {
+    await invoke('window_set_theme', { theme });
+    if (currentBackdrop() === 'system') {
+      await invoke('window_set_effect', {
+        enabled: true,
+        effectType: 'acrylic',
+        effect_type: 'acrylic',
+      });
+    }
+    return true;
+  } catch (e) {
+    console.warn('[platform] window theme failed', e);
+    return false;
   }
 }
 

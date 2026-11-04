@@ -441,6 +441,18 @@ fn window_set_titlebar(window: WebviewWindow, mode: String) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
+/// 窗口主题。DWM 的 Acrylic/Mica 染色跟着窗口主题走，不跟 CSS 走 ——
+/// 不设这一条，深色界面下系统材质仍然是浅色，导航栏会白得像一块纸。
+#[tauri::command]
+fn window_set_theme(window: WebviewWindow, theme: String) -> Result<(), String> {
+    let t = match theme.as_str() {
+        "dark" => tauri::Theme::Dark,
+        "light" => tauri::Theme::Light,
+        _ => return Ok(()),
+    };
+    window.set_theme(Some(t)).map_err(|e| e.to_string())
+}
+
 /// 真实系统材质入口（Windows DWM Acrylic / Mica / Blur）
 #[tauri::command]
 fn window_set_effect(
@@ -485,6 +497,7 @@ pub fn run() {
             open_in_explorer,
             open_url,
             window_set_titlebar,
+            window_set_theme,
             window_set_effect
         ])
         .run(tauri::generate_context!())

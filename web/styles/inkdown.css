@@ -95,24 +95,39 @@ gap: var(--s-2);
 
 /* ---------------- 文件树 ---------------- */
 
+/* 缩进只有一套账：层级深度由 JS 写在 --tree-depth 上，宽度全在这里算。
+   以前是 JS 直接写死 paddingLeft，改样式改不动、也没法做引导线。 */
 .ink-tree {
-display: flex;
-flex-direction: column;
-padding: 2px var(--s-4) var(--s-6);
+  --tree-step: 14px; /* 每级缩进 */
+  --tree-pad: 8px; /* 行首内边距 */
+  --tree-mark: 18px; /* 文件图标要让过文件夹的 chevron 列 */
+  display: flex;
+  flex-direction: column;
+  padding: 2px var(--s-4) var(--s-6);
 }
 
 .ink-tree__row {
-display: flex;
-align-items: center;
-gap: var(--s-3);
-min-height: 28px;
-padding: 3px var(--s-4);
-border-radius: var(--r-xs);
-color: var(--text-primary);
-font-size: var(--fs-12);
-letter-spacing: var(--tracking-caption);
-cursor: default;
-transition: background-color var(--dur-1) var(--ease-out);
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-height: 28px;
+  padding: 3px var(--s-4);
+  padding-left: calc(var(--tree-pad) + var(--tree-depth, 0) * var(--tree-step));
+  border-radius: var(--r-xs);
+  color: var(--text-primary);
+  font-size: var(--fs-12);
+  letter-spacing: var(--tracking-caption);
+  cursor: default;
+  transition: background-color var(--dur-1) var(--ease-out);
+  /* 引导线/色块画在分支的伪元素上，行要压在它们上面 */
+  position: relative;
+  z-index: 1;
+}
+
+.ink-tree__row[data-type="file"] {
+  padding-left: calc(
+    var(--tree-pad) + var(--tree-depth, 0) * var(--tree-step) + var(--tree-mark)
+  );
 }
 
 .ink-tree__row:focus-visible {
@@ -183,12 +198,67 @@ color: var(--accent);
 }
 
 .ink-tree__empty {
-display: flex;
-align-items: center;
-min-height: 24px;
-color: var(--text-quaternary);
-font-size: var(--fs-11);
-letter-spacing: var(--tracking-caption);
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  padding-left: calc(
+    var(--tree-pad) + var(--tree-depth, 0) * var(--tree-step) + var(--tree-mark)
+  );
+  color: var(--text-quaternary);
+  font-size: var(--fs-11);
+  letter-spacing: var(--tracking-caption);
+}
+
+/* ---------------- 文件树层级样式 ----------------
+   四档共用同一套缩进，只在「每级之间画什么」上分叉：
+   lines   连续引导竖线（Obsidian 风格）
+   rainbow 彩虹色块框 —— 每级一个色相，竖条 + 极淡底框
+   boxes   简约框 —— 同样的框，去掉颜色
+   none    什么都不画
+   位置都从 --tree-depth 算，和行的 padding 同一套账，所以永远对齐。 */
+
+.ink-tree__group,
+.ink-tree__branch {
+  position: relative;
+}
+
+/* 竖条位置的唯一来源：父级 chevron 的中心线 */
+.ink-tree__branch::before,
+.ink-tree__branch::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  display: none;
+}
+
+.ink-tree[data-indent="lines"] .ink-tree__branch::before {
+  display: block;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--tree-pad) + var(--tree-depth, 0) * var(--tree-step) + 5.5px);
+  width: 1px;
+  background: var(--line);
+}
+
+/* 彩虹：每级 52° 色相，从蓝起跳 —— 从 0 起跳的话第一层永远是红的，
+   看着像报错。框本身兼任引导线，不再单画一根竖条。 */
+.ink-tree[data-indent="rainbow"] .ink-tree__branch::after,
+.ink-tree[data-indent="boxes"] .ink-tree__branch::after {
+  display: block;
+  z-index: 0;
+  top: 1px;
+  bottom: 1px;
+  left: calc(var(--tree-pad) + var(--tree-depth, 0) * var(--tree-step) + 5px);
+  right: 2px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--line);
+  background: transparent;
+}
+
+.ink-tree[data-indent="rainbow"] .ink-tree__branch::after {
+  border-color: hsl(calc(205 + var(--tree-depth, 0) * 52) 62% 56% / 0.26);
+  border-left: 2px solid hsl(calc(205 + var(--tree-depth, 0) * 52) 62% 56% / 0.72);
+  background: hsl(calc(205 + var(--tree-depth, 0) * 52) 62% 56% / 0.05);
 }
 
 .ink-tree__rename {

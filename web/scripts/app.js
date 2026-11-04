@@ -10,7 +10,7 @@ import { icon, iconEl } from './core/icons.js';
 import { theme } from './core/theme.js';
 import { mountGlassSurfaces } from './core/glass-lens.js';
 import { revealOnScroll } from './core/scrollbar.js';
-import { isDesktop, setSidebarBackdrop } from './core/platform.js';
+import { isDesktop, setSidebarBackdrop, setWindowTheme } from './core/platform.js';
 
 /** Tauri v2 的窗口 API；比直接 invoke 插件命令稳，不用自己传窗口 label */
 const tauriWindow = () => globalThis.__TAURI__?.window?.getCurrentWindow?.();
@@ -257,6 +257,8 @@ themeBtn.addEventListener('click', () => {
 
 theme.subscribe(() => {
   syncThemeBtn();
+  // 系统材质（DWM Acrylic）按窗口主题染色，必须跟着 CSS 主题一起切
+  setWindowTheme(theme.resolved);
   if (applyingTheme) return;
   vault.patchSettings({ appearance: { mode: theme.mode, accent: theme.accent } });
 });
@@ -1061,7 +1063,7 @@ function renderFileTree() {
         } else {
           const branch = h('div', {
             class: 'ink-tree__branch',
-            'data-depth': String(depth % 6),
+            'data-depth': String(depth),
             style: { '--tree-depth': depth },
           });
           if (node.children.length) {
@@ -1072,13 +1074,20 @@ function renderFileTree() {
                 'div',
                 {
                   class: 'ink-tree__empty',
-                  style: { paddingLeft: `${8 + (depth + 1) * 14 + 18}px` },
+                  style: { '--tree-depth': depth + 1 },
                 },
                 '空文件夹'
               )
             );
           }
-          frag.append(h('div', { class: 'ink-tree__group', 'data-path': node.path }, fRow, branch));
+          frag.append(
+            h(
+              'div',
+              { class: 'ink-tree__group', 'data-path': node.path, style: { '--tree-depth': depth } },
+              fRow,
+              branch
+            )
+          );
         }
       } else {
         frag.append(noteRow(node, depth));
@@ -1109,7 +1118,7 @@ function folderRow(node, depth, open) {
       draggable: 'true',
       'aria-expanded': String(open),
       title: node.name,
-      style: { paddingLeft: `${8 + depth * 14}px` },
+      style: { '--tree-depth': depth },
       onclick: () => toggleFolder(node.path),
       onkeydown: (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -1208,7 +1217,7 @@ function noteRow(node, depth) {
       draggable: 'true',
       'aria-selected': node.path === state.current ? 'true' : 'false',
       title: node.name,
-      style: { paddingLeft: `${8 + depth * 14 + 18}px` },
+      style: { '--tree-depth': depth },
       onclick: () => openNote(node.path),
       onkeydown: (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -3521,7 +3530,9 @@ if (vault.workspace.navHidden) {
 }
 
 const initialBackdrop = vault.settings.appearance?.backdrop || 'system';
-setSidebarBackdrop(initialBackdrop).catch(() => {});
+// 先定窗口主题，再下发材质：DWM 按调用当下的窗口主题取色，
+// 顺序反了第一帧会是浅色材质，深色界面上一闪一块白。
+setWindowTheme(theme.resolved).finally(() => setSidebarBackdrop(initialBackdrop).catch(() => {}));
 
 mountGlassSurfaces();
 
