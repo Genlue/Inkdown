@@ -20,21 +20,26 @@ overflow: hidden;
 .ink-split {
 position: absolute;
 inset: 0;
-display: grid;
-grid-template-columns: var(--ink-list-w, 284px) minmax(0, 1fr);
 min-height: 0;
+/* 不用栅格：文件列表和导航栏一样是「盖在正文上的一列」，正文靠 margin-left 让位。
+   收起时那一跳是瞬时的、被还盖在原地的列表遮住，不会逐帧重排。 */
 background: var(--surface-content);
 }
 
 /* ---------------- 笔记列表 ---------------- */
 
 .ink-list {
-position: relative;
+position: absolute;
+inset: 0 auto 0 0;
+width: var(--ink-list-w, 284px);
+z-index: 2;
 display: flex;
 flex-direction: column;
 min-width: 0;
 min-height: 0;
 overflow: hidden;
+transform: translateX(0);
+transition: transform var(--nav-dur) var(--nav-ease), visibility 0s;
 /* 列背景铺到窗口顶边，只有内容让出工具栏 —— 工具栏是浮在列上的 */
 padding-top: var(--toolbar-h);
 background: var(--surface-sunken);
@@ -2067,5 +2072,34 @@ pre,
 .l-app--nav-hidden .ink-resizer--nav,
 .l-app--plain .ink-resizer--nav,
 .ink-split[data-inspector="0"] .ink-resizer--inspector {
+  display: none;
+}
+
+/* ==========================================================================
+   文件列表栏的收起 / 展开
+   —— 和导航栏同一套时序：滑出去 380ms，正文的让位要么当帧归零（收起），
+      要么等列表滑到位再跳（展开）。两条都由「谁盖着谁」决定。
+   ========================================================================== */
+
+.ink-split[data-list="0"] > .ink-list {
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform var(--nav-dur) var(--nav-ease), visibility 0s linear var(--nav-dur);
+}
+
+.ink-split[data-list="1"] > .ink-doc {
+  margin-left: var(--ink-list-w, 284px);
+  /* 展开方向：等列表滑到位再让位，跳变发生在它已经盖住左缘的瞬间 */
+  transition: margin-left 0s linear var(--nav-dur);
+}
+
+.ink-split[data-list="0"] > .ink-doc {
+  margin-left: 0;
+  /* 收起方向：当帧放开，跳变被列表遮住 */
+  transition: none;
+}
+
+/* 那一栏不在的时候，它的分隔条也不该在 */
+.ink-split[data-list="0"] .ink-resizer--list {
   display: none;
 }

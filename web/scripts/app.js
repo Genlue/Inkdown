@@ -107,6 +107,7 @@ const state = {
   splitRatio: Number(vault.workspace.split) || 0.5,
   recents: Array.isArray(vault.workspace.recents) ? vault.workspace.recents : [],
   recentsOpen: Boolean(vault.workspace.recentsOpen),
+  listHidden: Boolean(vault.workspace.listHidden),
   treeCollapsed: Boolean(vault.workspace.treeCollapsed),
   navHistory: [],
   navIndex: -1,
@@ -121,6 +122,7 @@ let titleTask = Promise.resolve();
 const app = document.getElementById('app');
 const topbar = app.querySelector('.c-topbar');
 const listPane = document.getElementById('listPane');
+const splitRoot = listPane.parentElement;
 const docPane = document.getElementById('docPane');
 
 /* ---------------- 当前对象 ---------------- */
@@ -209,6 +211,26 @@ function toggleNav(force) {
   }
 }
 navToggle.addEventListener('click', () => toggleNav());
+
+/* 文件列表栏：和导航栏、右侧栏都独立的一条状态。
+   收起 = 整列滑出去 + 正文的 margin-left 当帧归零（被还盖在上面的列表遮住），
+   和导航栏同一套「先遮后让」的时序。 */
+function setList(open, { persist = true } = {}) {
+  const value = Boolean(open);
+  state.listHidden = !value;
+  splitRoot.dataset.list = value ? '1' : '0';
+
+  const label = value ? '收起文件列表' : '展开文件列表';
+  filesBtn.title = label;
+  filesBtn.setAttribute('aria-label', label);
+  filesBtn.setAttribute('aria-pressed', String(!value));
+
+  if (persist) vault.patchWorkspace({ listHidden: !value });
+}
+
+function toggleList(force) {
+  setList(typeof force === 'boolean' ? force : Boolean(state.listHidden));
+}
 
 const viewSeg = Segmented({
   value: state.mode,
@@ -470,8 +492,23 @@ function openQuickSwitcher() {
 // 方案 3：纯净流式顶栏 —— 中央面包屑路径 + 大面积窗口拖拽区域
 /* 位置由 .c-topbar__lead 决定（展开导航栏时整组右移），
    胶囊只负责材质和排版 —— 少一个 lead 类，展开时就会和「收起」胶囊叠在一起。 */
-const topbarBreadcrumb = Capsule({ className: 'c-topbar__lead c-topbar__breadcrumb' });
+const topbarBreadcrumb = Capsule({ className: 'c-topbar__breadcrumb' });
 topbarBreadcrumb.setAttribute('data-no-drag', '');
+
+/* 文件列表的开关。
+   它跟着标题组一起移动，不进 .l-chrome —— 它管的是「内容列左边那一栏」，
+   不是窗口 chrome（红绿灯 + 导航开关）。 */
+const filesBtn = IconButton({
+  icon: 'folder-tree',
+  label: '收起文件列表',
+  onClick: () => toggleList(),
+});
+const topbarLead = h(
+  'div',
+  { class: 'c-topbar__lead', 'data-no-drag': '' },
+  Capsule({ round: true, children: filesBtn }),
+  topbarBreadcrumb
+);
 const viewCapsule = Capsule({ children: [viewSeg] });
 
 topbar.append(
@@ -491,7 +528,7 @@ topbar.append(
     }),
     Capsule({ round: true, className: 'l-chrome__toggle', children: navToggle })
   ),
-  topbarBreadcrumb,
+  topbarLead,
   h(
     'div',
     { class: 'c-topbar__pills', 'data-no-drag': '' },
@@ -3322,6 +3359,12 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
+  if (mod && e.shiftKey && key === 'b') {
+    e.preventDefault();
+    toggleList();
+    return;
+  }
+
   if (mod && e.shiftKey && key === 'e') {
     e.preventDefault();
     toggleSidebar();
@@ -3373,7 +3416,6 @@ globalThis.inkdown = {
    三根缝：导航栏 ↔ 文件列表、文件列表 ↔ 正文、正文 ↔ 右侧栏。
    拖动只改 CSS 变量（宽度都从变量来），松手才写回 workspace。 */
 
-const splitRoot = listPane.parentElement;
 const rootStyle = document.documentElement.style;
 const clampPx = (v, min, max) => Math.min(Math.max(v, min), max);
 
@@ -3463,6 +3505,7 @@ if (state.current) {
   await renderAll();
 }
 setSidebar(state.sidebar, { persist: false, autoMode: false });
+setList(!state.listHidden, { persist: false });
 requestAnimationFrame(() => requestAnimationFrame(() => splitEl.classList.remove('is-booting')));
 
 // 首屏画完再建索引：不挡住第一次绘制，建好后关联视图自己会刷新
