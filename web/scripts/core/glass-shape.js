@@ -1,5 +1,5 @@
 // ============================================================
-// Lumina · Glass Shape
+// Inkdown · Glass Shape
 // 液态玻璃的形状层：把 { w, h, radius | polygon } 变成一个可求值的场。
 //
 // 这里是**唯一**一版 SDF。CSS 那条路（refraction.js 生成位移贴图）和渲染层

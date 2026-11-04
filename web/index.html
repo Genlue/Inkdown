@@ -10,27 +10,32 @@
       document.documentElement.dataset.desktop = '1';
       document.documentElement.dataset.backdrop = 'system';
     }
-    window.addEventListener('error', function(e) {
-      console.error(e);
+
+    // 错误兜底面板只给开发看：浏览器预览（localhost）或显式 ?debug=1。
+    // 打包后的桌面端默认只往控制台写 —— 用户不该对着一块红底堆栈发呆。
+    var DEV_PANEL =
+      new URLSearchParams(location.search).has('debug') ||
+      (!(window.__TAURI__ && window.__TAURI__.core) &&
+        /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname));
+
+    function report(kind, text) {
+      if (!DEV_PANEL) return;
       var el = document.getElementById('__app_error__');
       if (!el) {
         el = document.createElement('div');
         el.id = '__app_error__';
-        el.style.cssText = 'position:fixed;top:40px;left:40px;right:40px;z-index:999999;background:rgba(220,38,38,0.95);color:#fff;padding:20px;border-radius:12px;font-family:monospace;font-size:13px;white-space:pre-wrap;box-shadow:0 12px 40px rgba(0,0,0,0.5);';
+        el.style.cssText = 'position:fixed;top:40px;left:40px;right:40px;z-index:999999;max-height:70vh;overflow:auto;background:rgba(220,38,38,0.95);color:#fff;padding:20px;border-radius:12px;font-family:ui-monospace,monospace;font-size:13px;white-space:pre-wrap;box-shadow:0 12px 40px rgba(0,0,0,0.5);';
         document.body.appendChild(el);
       }
-      el.textContent += '[Error] ' + e.message + '\n' + (e.filename || '') + ':' + (e.lineno || '') + '\n' + (e.error?.stack || '') + '\n';
+      el.textContent += '[' + kind + '] ' + text + '\n';
+    }
+    window.addEventListener('error', function(e) {
+      console.error(e);
+      report('Error', e.message + '\n' + (e.filename || '') + ':' + (e.lineno || '') + '\n' + (e.error?.stack || ''));
     });
     window.addEventListener('unhandledrejection', function(e) {
       console.error(e);
-      var el = document.getElementById('__app_error__');
-      if (!el) {
-        el = document.createElement('div');
-        el.id = '__app_error__';
-        el.style.cssText = 'position:fixed;top:40px;left:40px;right:40px;z-index:999999;background:rgba(220,38,38,0.95);color:#fff;padding:20px;border-radius:12px;font-family:monospace;font-size:13px;white-space:pre-wrap;box-shadow:0 12px 40px rgba(0,0,0,0.5);';
-        document.body.appendChild(el);
-      }
-      el.textContent += '[Unhandled Promise] ' + (e.reason?.stack || e.reason) + '\n';
+      report('Unhandled Promise', e.reason?.stack || e.reason);
     });
   </script>
   <title>Inkdown</title>

@@ -1,5 +1,5 @@
 // ============================================================
-// Lumina · Glass Schema
+// Inkdown · Glass Schema
 // 无 DOM 的光学契约：raw 默认值、各面覆盖项、存储范围与 UI 推荐范围。
 // band / amount / strokeHalf / strokeFeather 使用形状本地 px；light 使用角度。
 // effective coating 由 theme 另乘全局通透度，不写回这里的 raw 参数。

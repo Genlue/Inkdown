@@ -3,6 +3,13 @@
    仓库制：一个仓库 = 一个文件夹，配置在 .inkdown/，笔记是文件夹树里的 .md。
 
    结构：窗口顶栏 / 导航 / 文件树 / 编辑器 + 预览 / 可插拔右侧栏
+
+   章节（自上而下就是执行顺序，找东西先看这张表）：
+     启动 · 当前对象 · 主题与外观 · 顶栏 · 导航 · 文件列表 · 最近打开
+     · 列表渲染 · 文档区 · 右侧栏 · 链接索引 · 渲染文档 · 打开/新建/重命名
+     · 保存 · 查找替换 · 键入 [[ 提示 · 字号与缩放 · 收藏/回收站 · 右键菜单
+     · 视图模式/跳转 · 编辑/预览分栏 · 三栏宽度拖拽 · 快捷键 · 插件接口
+     · 首次渲染 · 全局上下文菜单
    ========================================================================== */
 
 import { h, fill, debounce } from './core/dom.js';
@@ -3250,7 +3257,7 @@ function jumpToLine(line) {
   }
 }
 
-/* ---------------- 分栏拖拽 ---------------- */
+/* ---------------- 编辑 / 预览分栏 ---------------- */
 
 let dragging = false;
 
@@ -3287,6 +3294,78 @@ divider.addEventListener('dblclick', () => {
   panes.style.setProperty('--split', '50%');
   vault.patchWorkspace({ split: 0.5 });
 });
+
+/* ---------------- 三栏宽度拖拽 ----------------
+   三根缝：导航栏 ↔ 文件列表、文件列表 ↔ 正文、正文 ↔ 右侧栏。
+   拖动只改 CSS 变量（宽度都从变量来），松手才写回 workspace。 */
+
+const rootStyle = document.documentElement.style;
+const clampPx = (v, min, max) => Math.min(Math.max(v, min), max);
+
+/* 导航栏 */
+let navBase = 0;
+const navResizer = Resizer({
+  axis: 'x',
+  label: '调整导航栏宽度',
+  className: 'ink-resizer ink-resizer--nav',
+  onDelta(dx, phase) {
+    if (phase === 'start' || phase === 'key') navBase = side.getBoundingClientRect().width;
+    const next = clampPx(navBase + dx, 176, 360);
+    app.style.setProperty('--nav-w', `${Math.round(next)}px`);
+    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ navWidth: Math.round(next) });
+  },
+  onReset() {
+    app.style.removeProperty('--nav-w');
+    vault.patchWorkspace({ navWidth: 0 });
+  },
+});
+
+/* 文件列表 */
+let listBase = 0;
+const listResizer = Resizer({
+  axis: 'x',
+  label: '调整文件列表宽度',
+  className: 'ink-resizer ink-resizer--list',
+  onDelta(dx, phase) {
+    if (phase === 'start' || phase === 'key') listBase = listPane.getBoundingClientRect().width;
+    const next = clampPx(listBase + dx, 200, 520);
+    rootStyle.setProperty('--ink-list-w', `${Math.round(next)}px`);
+    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ listWidth: Math.round(next) });
+  },
+  onReset() {
+    rootStyle.removeProperty('--ink-list-w');
+    vault.patchWorkspace({ listWidth: 0 });
+  },
+});
+
+/* 右侧栏 */
+let inspectorBase = 0;
+const inspectorResizer = Resizer({
+  axis: 'x',
+  label: '调整右侧栏宽度',
+  className: 'ink-resizer ink-resizer--inspector',
+  onDelta(dx, phase) {
+    if (phase === 'start' || phase === 'key') inspectorBase = sidebar.getBoundingClientRect().width;
+    // 往左拖变宽，所以取负
+    const next = clampPx(inspectorBase - dx, 220, 460);
+    rootStyle.setProperty('--ink-inspector-w', `${Math.round(next)}px`);
+    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ inspectorWidth: Math.round(next) });
+  },
+  onReset() {
+    rootStyle.removeProperty('--ink-inspector-w');
+    vault.patchWorkspace({ inspectorWidth: 0 });
+  },
+});
+
+splitRoot.append(navResizer, listResizer, inspectorResizer);
+
+// 上次会话的栏宽
+const savedLayout = vault.workspace;
+if (savedLayout.navWidth > 0) app.style.setProperty('--nav-w', `${savedLayout.navWidth}px`);
+if (savedLayout.listWidth > 0) rootStyle.setProperty('--ink-list-w', `${savedLayout.listWidth}px`);
+if (savedLayout.inspectorWidth > 0) {
+  rootStyle.setProperty('--ink-inspector-w', `${savedLayout.inspectorWidth}px`);
+}
 
 /* ---------------- 快捷键 ---------------- */
 
@@ -3421,77 +3500,6 @@ globalThis.inkdown = {
   toast,
 };
 
-/* ---------------- 分栏拖拽 ----------------
-   三根缝：导航栏 ↔ 文件列表、文件列表 ↔ 正文、正文 ↔ 右侧栏。
-   拖动只改 CSS 变量（宽度都从变量来），松手才写回 workspace。 */
-
-const rootStyle = document.documentElement.style;
-const clampPx = (v, min, max) => Math.min(Math.max(v, min), max);
-
-/* 导航栏 */
-let navBase = 0;
-const navResizer = Resizer({
-  axis: 'x',
-  label: '调整导航栏宽度',
-  className: 'ink-resizer ink-resizer--nav',
-  onDelta(dx, phase) {
-    if (phase === 'start' || phase === 'key') navBase = side.getBoundingClientRect().width;
-    const next = clampPx(navBase + dx, 176, 360);
-    app.style.setProperty('--nav-w', `${Math.round(next)}px`);
-    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ navWidth: Math.round(next) });
-  },
-  onReset() {
-    app.style.removeProperty('--nav-w');
-    vault.patchWorkspace({ navWidth: 0 });
-  },
-});
-
-/* 文件列表 */
-let listBase = 0;
-const listResizer = Resizer({
-  axis: 'x',
-  label: '调整文件列表宽度',
-  className: 'ink-resizer ink-resizer--list',
-  onDelta(dx, phase) {
-    if (phase === 'start' || phase === 'key') listBase = listPane.getBoundingClientRect().width;
-    const next = clampPx(listBase + dx, 200, 520);
-    rootStyle.setProperty('--ink-list-w', `${Math.round(next)}px`);
-    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ listWidth: Math.round(next) });
-  },
-  onReset() {
-    rootStyle.removeProperty('--ink-list-w');
-    vault.patchWorkspace({ listWidth: 0 });
-  },
-});
-
-/* 右侧栏 */
-let inspectorBase = 0;
-const inspectorResizer = Resizer({
-  axis: 'x',
-  label: '调整右侧栏宽度',
-  className: 'ink-resizer ink-resizer--inspector',
-  onDelta(dx, phase) {
-    if (phase === 'start' || phase === 'key') inspectorBase = sidebar.getBoundingClientRect().width;
-    // 往左拖变宽，所以取负
-    const next = clampPx(inspectorBase - dx, 220, 460);
-    rootStyle.setProperty('--ink-inspector-w', `${Math.round(next)}px`);
-    if (phase === 'end' || phase === 'key') vault.patchWorkspace({ inspectorWidth: Math.round(next) });
-  },
-  onReset() {
-    rootStyle.removeProperty('--ink-inspector-w');
-    vault.patchWorkspace({ inspectorWidth: 0 });
-  },
-});
-
-splitRoot.append(navResizer, listResizer, inspectorResizer);
-
-// 上次会话的栏宽
-const savedLayout = vault.workspace;
-if (savedLayout.navWidth > 0) app.style.setProperty('--nav-w', `${savedLayout.navWidth}px`);
-if (savedLayout.listWidth > 0) rootStyle.setProperty('--ink-list-w', `${savedLayout.listWidth}px`);
-if (savedLayout.inspectorWidth > 0) {
-  rootStyle.setProperty('--ink-inspector-w', `${savedLayout.inspectorWidth}px`);
-}
 
 /* ---------------- 首次渲染 ---------------- */
 

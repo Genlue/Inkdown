@@ -1,5 +1,5 @@
 // ============================================================
-// Lumina · Glass Lens
+// Inkdown · Glass Lens
 // 把一块玻璃挂到 DOM 上。**背板由合成器提供，不自己画。**
 //
 //   旧：glass-texture 用 canvas 把 DOM 背景重画一遍 → 假背板 → WebGL 逐像素算

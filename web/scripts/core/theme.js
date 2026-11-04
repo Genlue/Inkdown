@@ -1,5 +1,5 @@
 // ============================================================
-// Lumina · Theme
+// Inkdown · Theme
 // 主题 / 强调色 / 液态玻璃参数的唯一入口。
 // 「跟随系统」是真跟随：监听 prefers-color-scheme，系统切换即刻生效。
 //
@@ -20,7 +20,9 @@ import {
 const root = document.documentElement;
 const mq = window.matchMedia('(prefers-color-scheme: dark)');
 // 版本号进 key：改了默认值就换一档，避免旧存档把新默认值盖掉
-const KEY = 'lumina.appearance.v8';
+const KEY = 'inkdown.appearance.v1';
+/** 迁移用：这套设计系统最早挂在 Lumina 名下，键名前缀是老的 */
+const LEGACY_KEY = 'lumina.appearance.v8';
 const THEME_JSON_VERSION = 1;
 
 /** 七类玻璃面。cls 用于写 CSS 兜底变量，id 用于取参数 */
@@ -289,7 +291,17 @@ function commit({ persist = true } = {}) {
 
 function load() {
   try {
-    const raw = localStorage.getItem(KEY);
+    let raw = localStorage.getItem(KEY);
+
+    // 老键迁移：只读一次、写进新键，旧键留着不动（回滚旧版本时配置还在）
+    if (!raw) {
+      const legacy = localStorage.getItem(LEGACY_KEY);
+      if (legacy) {
+        raw = legacy;
+        localStorage.setItem(KEY, legacy);
+      }
+    }
+
     if (!raw) return;
     const saved = JSON.parse(raw);
     if (!isThemeRecord(saved)) return;

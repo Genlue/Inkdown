@@ -1,5 +1,5 @@
 // ============================================================
-// Lumina · Icons
+// Inkdown · Icons
 // 统一 24x24 视框、1.7 描边、currentColor —— SF Symbols 的近似平移。
 // icon(name, size) 返回 SVG 字符串；mountIcons(root) 替换 data-icon 占位元素。
 // ============================================================

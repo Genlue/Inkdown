@@ -1,5 +1,5 @@
 // ============================================================
-// Lumina · Refraction
+// Inkdown · Refraction
 // 移植自 DeskCanvas 的液态玻璃通道（src/DeskCanvas/Services/LiquidGlass/LiquidGlassPass.cs）。
 // 原实现是 SkSL 运行时着色器 + 一份逐像素的 CPU 孪生；这里把「位移」这一段搬到浏览器：
 // 用形状 SDF 现算一张位移贴图，交给 feDisplacementMap 逐像素偏移后景。
