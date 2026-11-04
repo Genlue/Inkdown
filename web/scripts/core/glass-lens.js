@@ -16,7 +16,7 @@
 // 没有 canvas、没有 rAF、没有滚动监听 —— 背板变了合成器自己会重算。
 // ============================================================
 
-import { resolveGlassShape } from './glass-shape.js';
+import { resolveGlassShape, roundedRectPolygon } from './glass-shape.js';
 import {
   normalizeGlassOptics,
   glassMapSize,
@@ -58,6 +58,23 @@ const BLUR_TOKEN = {
   toast: '--m-popover-blur',
   sheet: '--m-sheet-blur',
 };
+
+/* ---------------- 交互期降级 ----------------
+ *
+ * 为什么需要它：完整材质是 `blur() + url(#filter)`，SVG 滤镜链要逐像素跑位移、
+ * 色散、高光，合成器每帧都为整块面板重算一次 —— 面积越大越贵。拖动、改宽、
+ * 开合面板时元素尺寸/位置每帧都在变，这笔钱就每帧都要付。
+ *
+ * 降级只做一件事：把 `url(#filter)` 摘掉，保留 `blur() saturate()`。
+ * 观感仍然是磨砂玻璃，只是没有折射与边缘高光；交互一停立刻恢复并只重建一次。
+ * 期间**不测尺寸、不生成贴图**，所以 ResizeObserver 再怎么响也不会卡主线程。
+ */
+/** 非交互期的最小重建间隔：连续改尺寸时每秒最多重建 10 次，而不是每次回调一次 */
+const MIN_REBUILD_GAP = 100;
+
+/** 交互嵌套计数：抽屉、分栏、窗口 resize 可能同时发生，谁先结束都不能提前恢复 */
+let interactionDepth = 0;
+let liteOn = false;
 
 /* ---------------- 贴图编码 ---------------- */
 
@@ -336,6 +353,12 @@ export function mountGlassLens(host, o = {}) {
   let disposed = false;
   let everConnected = !!host.isConnected;
   let signature = '';
+  /** 当前挂在元素上的滤镜是不是降级版（只有 blur + saturate） */
+  let liteApplied = false;
+  /** 上次真正生成贴图的时刻；节流用它算最小间隔 */
+  let lastBuild = 0;
+  let rafToken = 0;
+  let timerToken = 0;
 
   const lens = {
     kind: 'native',
@@ -343,10 +366,15 @@ export function mountGlassLens(host, o = {}) {
     why: '',
     refresh,
     invalidate: refresh,
+    applyLite,
+    restore,
     dispose() {
       if (disposed) return;
       disposed = true;
       ro?.disconnect();
+      if (rafToken) cancelAnimationFrame(rafToken);
+      if (timerToken) clearTimeout(timerToken);
+      rafToken = timerToken = 0;
       clearHostGlass(host);
       if (host.__glassLens === lens) delete host.__glassLens;
       // 销毁路径不能为了删滤镜而重新创建共享 SVG。
@@ -359,11 +387,69 @@ export function mountGlassLens(host, o = {}) {
 
   function measure() {
     if (shapeOf) return resolveGlassShape(shapeOf());
-    const radius = parseFloat(getComputedStyle(host).borderTopLeftRadius) || 0;
+    const w = host.offsetWidth || 24;
+    const h = host.offsetHeight || 16;
+    const cs = getComputedStyle(host);
+    // 四角分别读：抽屉这类贴边面板是「外侧圆、贴边侧方」，
+    // 只取 borderTopLeftRadius 会把贴边的那两个角也磨圆。
+    const radii = [
+      'borderTopLeftRadius',
+      'borderTopRightRadius',
+      'borderBottomRightRadius',
+      'borderBottomLeftRadius',
+    ].map((k) => parseFloat(cs[k]) || 0);
+    const uniform = radii.every((r) => Math.abs(r - radii[0]) < 0.5);
     return resolveGlassShape({
-      w: host.offsetWidth || 24,
-      h: host.offsetHeight || 16,
-      radius,
+      w,
+      h,
+      radius: radii[0],
+      polygon: uniform ? null : roundedRectPolygon(w, h, radii),
+    });
+  }
+
+  /**
+   * 交互期版本：只保留模糊与提饱和。
+   * 不调 measure() —— 这就是「拖动时没有逐帧 getComputedStyle」的原因。
+   */
+  function applyLite() {
+    if (disposed || !host.isConnected) return;
+    const p = normalizeGlassOptics(paramsOf());
+    const blur = Number.isFinite(o.blur) ? o.blur : resolveBlur(host, surface);
+    const blurToken = surface === 'thumb' ? 'var(--thumb-blur-px)' : `${blur.toFixed(2)}px`;
+    const value = `blur(${blurToken}) saturate(${Math.max(0, p.vibrancy).toFixed(2)})`;
+    host.style.setProperty('backdrop-filter', value, 'important');
+    host.style.setProperty('-webkit-backdrop-filter', value, 'important');
+    // 仍然标记玻璃面：CSS 的假材质必须继续让位，否则会在模糊上再叠一层折射
+    host.setAttribute('data-glass', surface);
+    liteApplied = true;
+  }
+
+  /** 交互结束：下一帧恢复完整滤镜，避开 pointerup 同一帧的一次性尖峰 */
+  function restore() {
+    requestAnimationFrame(() => {
+      if (disposed || liteOn) return;
+      refresh();
+    });
+  }
+
+  /**
+   * ResizeObserver 的入口：先合并到一帧，再按最小间隔限流。
+   * 尺寸连续变化的动画（栏宽、面板开合、抽屉改高）本来会每帧重建一次贴图，
+   * 512×512 的逐像素 SDF 一次就是几十到上百毫秒 —— 那是整段交互卡死的根因。
+   */
+  function requestRefresh() {
+    if (disposed || rafToken || timerToken) return;
+    rafToken = requestAnimationFrame(() => {
+      rafToken = 0;
+      const wait = MIN_REBUILD_GAP - (performance.now() - lastBuild);
+      if (wait > 0) {
+        timerToken = setTimeout(() => {
+          timerToken = 0;
+          refresh();
+        }, wait);
+      } else {
+        refresh();
+      }
     });
   }
 
@@ -377,6 +463,13 @@ export function mountGlassLens(host, o = {}) {
       return false;
     }
     everConnected = true;
+
+    // 交互期不做任何几何测量：新挂载的玻璃也只挂降级滤镜
+    if (liteOn) {
+      if (!liteApplied) applyLite();
+      lens.why = 'lite';
+      return true;
+    }
 
     const shape = measure();
     if (shape.w < 2 || shape.h < 2) { lens.why = 'zero'; return false; }
@@ -392,16 +485,18 @@ export function mountGlassLens(host, o = {}) {
 
     const blur = Number.isFinite(o.blur) ? o.blur : resolveBlur(host, surface);
 
-    // 签名一样就不动 DOM：滚动、hover、重排都不该触发重建
+    // 签名一样就不动 DOM：滚动、hover、重排都不该触发重建。
+    // liteApplied 时即使签名没变也必须重建一次 —— 否则恢复后会停在降级滤镜上。
     const sig = [
       shape.w, shape.h, shape.radius, shape.verts ? shape.verts.join(',') : '',
       p.band, p.amount, p.depth, p.dispersion, p.vibrancy, p.coating, p.coatingColor,
       p.strokeHalf, p.strokeFeather, p.strokeAlpha, p.falloff, p.light, blur,
     ].join('|');
-    if (sig === signature) return true;
+    if (sig === signature && !liteApplied) return true;
     signature = sig;
 
     buildFilter(id, shape, p);
+    lastBuild = performance.now();
 
     // 拇指的模糊不能写成具体数值：它按下时要收到 0，而且中间有 150ms 过渡。
     // 把 CSS 变量原样写进滤镜列表，var 每帧重解析，过渡就还归 CSS 管。
@@ -410,11 +505,12 @@ export function mountGlassLens(host, o = {}) {
     host.style.setProperty('backdrop-filter', value, 'important');
     host.style.setProperty('-webkit-backdrop-filter', value, 'important');
     host.setAttribute('data-glass', surface);
+    liteApplied = false;
     return true;
   }
 
   const ro = typeof ResizeObserver !== 'undefined'
-    ? new ResizeObserver(() => refresh())
+    ? new ResizeObserver(() => requestRefresh())
     : null;
   ro?.observe(host);
 
@@ -428,6 +524,64 @@ export function mountGlassLens(host, o = {}) {
 /** 强制重画所有透镜；曾经连接后失联的实例在这里回收。 */
 export function refreshAllLenses() {
   for (const lens of [...mountedLenses]) lens.refresh();
+}
+
+/**
+ * 开关交互期降级。幂等，只影响挂载中的透镜。
+ * 打开时立即换成 blur+saturate（不读尺寸、不建贴图）；关闭时各透镜在下一帧
+ * 自己重建 —— 但签名没变的不重建，所以「只动了一根栏宽」只会重算那一块。
+ */
+function setGlassLite(on) {
+  if (liteOn === on) return;
+  liteOn = on;
+  const root = document.documentElement;
+  if (on) root.dataset.glassLite = '1';
+  else delete root.dataset.glassLite;
+
+  for (const lens of [...mountedLenses]) {
+    if (on) lens.applyLite();
+    else lens.restore();
+  }
+}
+
+/**
+ * 交互开始/结束。用计数而不是布尔：窗口 resize 与抽屉拖动可能重叠，
+ * 任何一方先结束都不该提前恢复完整滤镜。
+ */
+export function beginGlassInteraction() {
+  interactionDepth++;
+  if (interactionDepth === 1) setGlassLite(true);
+}
+
+export function endGlassInteraction() {
+  if (interactionDepth === 0) return;
+  interactionDepth--;
+  if (interactionDepth === 0) setGlassLite(false);
+}
+
+/** 当前是否处于降级（测试/诊断用） */
+export function isGlassLite() {
+  return liteOn;
+}
+
+/**
+ * 窗口 resize 也按交互处理：拖窗口边缘时每帧都会触发 ResizeObserver，
+ * 不降级就是「每帧重建九块玻璃」。停止 160ms 后才恢复并重建一次。
+ */
+if (typeof window !== 'undefined') {
+  let resizing = false;
+  let resizeTimer = 0;
+  window.addEventListener('resize', () => {
+    if (!resizing) {
+      resizing = true;
+      beginGlassInteraction();
+    }
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizing = false;
+      endGlassInteraction();
+    }, 160);
+  }, { passive: true });
 }
 
 /** 当前挂载数量（测试/调试用） */

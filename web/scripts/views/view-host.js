@@ -24,6 +24,8 @@ export class ViewHost {
 
     this.activeTab = null;
     this.viewCache = new Map(); // tabId -> HTMLElement
+    this.pageMounted = new Set(); // 通用页面里已经跑过 mount 的 tabId
+    this.pageControllers = new Map(); // tabId -> mount 返回的控制器
     this.emptyNode = h('div', { class: 'ink-view-host__empty' });
 
     // 把现有的 Markdown 节点装入缓存池
@@ -104,7 +106,42 @@ export class ViewHost {
       return;
     }
 
-    // 3. 其他非 Markdown 文件（PDF、图片、视频、音频、Office、代码等）
+    // 3. 通用页面：tab.mount(host, ctx) 由调用方提供。
+    //    插件页、未来的 AI 面板都走这一条，ViewHost 不需要为每个页面加分支。
+    if (typeof tab.mount === 'function') {
+      let pageEl = this.viewCache.get(fileId);
+      if (!pageEl) {
+        // l-page-inset：整页视图必须让出顶栏那一行，否则第一屏标题压在胶囊底下
+        pageEl = h('div', { class: 'c-page-host l-page-inset' });
+        this.viewCache.set(fileId, pageEl);
+        this.container.append(pageEl);
+      }
+      pageEl.style.display = '';
+
+      // mount 只跑一次：页面自己保留状态，切走再切回来不重新初始化
+      if (!this.pageMounted.has(fileId)) {
+        this.pageMounted.add(fileId);
+        try {
+          const ctl = await tab.mount(pageEl, appContext);
+          if (ctl) this.pageControllers.set(fileId, ctl);
+        } catch (err) {
+          // 页面自己崩了也不能把整个文档区留白：留一张错误卡，
+          // 插件停用时会 destroyView，下次启用再重新挂
+          console.warn(`[viewHost] 页面 ${fileId} 挂载失败`, err);
+          fill(
+            pageEl,
+            Empty({
+              icon: 'x-circle',
+              title: '页面加载失败',
+              desc: String(err?.message || err),
+            })
+          );
+        }
+      }
+      return;
+    }
+
+    // 4. 其他非 Markdown 文件（PDF、图片、视频、音频、Office、代码等）
     let viewEl = this.viewCache.get(fileId);
     if (!viewEl) {
       const targetPath = tab.path || fileId;
@@ -137,6 +174,14 @@ export class ViewHost {
   destroyView(tabId) {
     const el = this.viewCache.get(tabId);
     if (el && tabId !== '__note__') {
+      const ctl = this.pageControllers.get(tabId);
+      try {
+        ctl?.destroy?.();
+      } catch (err) {
+        console.warn('[viewHost] page destroy error', err);
+      }
+      this.pageControllers.delete(tabId);
+      this.pageMounted.delete(tabId);
       el.remove();
       this.viewCache.delete(tabId);
     }

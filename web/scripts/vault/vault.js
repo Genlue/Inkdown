@@ -43,7 +43,8 @@ const SETTINGS_PATH = '.inkdown/settings.json';
 const WORKSPACE_PATH = '.inkdown/workspace.json';
 const INDEX_PATH = '.inkdown/index.json';
 const TRASH_PATH = '.inkdown/trash.json';
-const PLUGINS_DIR = '.inkdown/plugins';
+/** 插件目录相对仓库根的位置。插件宿主只认这个常量，不要自己拼字符串 */
+export const PLUGINS_DIR = '.inkdown/plugins';
 const TRASH_DIR = '.trash';
 
 const DEFAULT_SETTINGS = {
@@ -422,8 +423,12 @@ export class Vault {
     };
   }
 
-  async readNote(path) {
-    if (this.cache.has(path)) return this.cache.get(path);
+  /**
+   * 读正文。默认走缓存（列表、搜索会反复读同一批文件）。
+   * fresh = true 时强制回磁盘：外部改动可能让缓存过期，这时不能相信它。
+   */
+  async readNote(path, { fresh = false } = {}) {
+    if (!fresh && this.cache.has(path)) return this.cache.get(path);
     const text = (await this.fs.read(path)) ?? '';
     this.cache.set(path, text);
     return text;

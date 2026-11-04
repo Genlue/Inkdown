@@ -7,6 +7,7 @@ import { h } from '../core/dom.js';
 import { theme } from '../core/theme.js';
 import { setSidebarBackdrop, currentBackdrop } from '../core/platform.js';
 import { CardGroup, Row, Segmented, Swatches, Select, Button, toast } from '../ui/kit.js';
+import { mountSettingsSections } from '../plugins/registry.js';
 
 const SYSTEM_DEFAULT_FONTS = [
   '系统默认 (System Default)',
@@ -368,6 +369,13 @@ export function createSettingsView({ vault, onFontChange, onThemeChange, onPickF
   });
 
   scrollBody.append(vaultCard, appearanceCard, typographyCardContainer, editorCard, aboutCard);
+
+  // 插件追加的分区（ctx.ui.settingsSection）。宿主只给容器，
+  // 里面长什么样由插件自己决定；插件停用时注册表会通知这里重画。
+  const pluginSections = h('div', { class: 'l-stack l-stack--7' });
+  scrollBody.append(pluginSections);
+  const offSections = mountSettingsSections(pluginSections);
+  container.dispose = () => offSections();
 
   return container;
 }

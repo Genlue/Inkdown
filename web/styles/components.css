@@ -164,6 +164,18 @@
   background: var(--accent-hover);
   color: var(--text-on-accent);
 }
+/* 两态的图标按钮：展开/启用 = 强调色图标，收起 = 中性。
+   不做实心块 —— 实心是 variant:'on' 的语义（单选、当前页），
+   开关只表示「这个面板现在是开着的」，不该和「选中了某一项」长得一样。
+   用法：IconButton({ toggle: true, active: on })，状态落在 aria-pressed 上，
+   颜色由这里统一给，页面不要再各写一份 .is-on。 */
+.c-iconbtn[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+.c-iconbtn[aria-pressed="true"]:hover {
+  color: var(--accent-hover);
+}
 
 .c-iconbtn--sm {
   --ctl-h: 22px;
@@ -2561,6 +2573,19 @@ html[data-focused="0"] .c-nav__item[aria-selected="true"] .c-nav__icon {
 
 /* 不支持原生滤镜的浏览器（Safari）什么都不挂，CSS 材质原样生效。
    这不是降级失败，是换了一条路 —— 上面那条注释就是它的开关。 */
+
+/* 交互期降级（拖动 / 改宽 / 开合面板）。
+   渲染层会把 url(#filter) 摘掉，只留 blur()+saturate()；折射与边缘高光暂时缺席，
+   这里用**和渲染层同一个涂层色**补一层底色，避免降级时整块玻璃明显发暗。
+   只动 background —— 千万别在这里写 backdrop-filter: none !important，
+   那会把引擎写的内联滤镜一起打回原形，连模糊都没了。 */
+:root[data-glass-lite="1"] [data-glass] {
+  background: color-mix(
+    in srgb,
+    var(--lg-coating-color, rgb(var(--glass-rgb))) calc(var(--lg-coating) * 100%),
+    transparent
+  ) !important;
+}
 
 /* ==========================================================================
    24. 页签 Tabs

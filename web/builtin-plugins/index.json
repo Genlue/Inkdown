@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "_note": "内置插件清单。plugins 里每项写成 { \"id\": \"ai\", \"files\": [\"manifest.json\", \"main.js\", \"style.css\"] }，files 必须列全 —— 宿主不会去猜插件目录里有什么。启动时若 .inkdown/plugins/<id>/manifest.json 不存在，就从 web/builtin-plugins/<id>/ 按这个清单逐个 fetch 写进仓库。",
+  "plugins": [
+    {
+      "id": "ai",
+      "files": [
+        "manifest.json",
+        "main.js",
+        "api.js",
+        "chat.js",
+        "sessions.js",
+        "history.js",
+        "ui.js",
+        "style.css"
+      ]
+    }
+  ]
+}

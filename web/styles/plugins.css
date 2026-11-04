@@ -1,0 +1,311 @@
+/* ==========================================================================
+   Inkdown · Plugins
+   插件页与插件为宿主贡献的界面元素。
+   只允许 c-* 类 + var(--*) 令牌；圆角从 --r-* 阶梯里取，不写字面色值。
+   ========================================================================== */
+
+/* ---------- ViewHost 的通用页面容器 ---------- */
+
+/* tab.mount 建出来的那一层：撑满文档区，页面自己决定滚不滚 */
+.c-page-host {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------- 插件页 ---------- */
+
+.c-plugin-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.c-plugin-page__body {
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--s-9) var(--s-8) 60px;
+}
+
+/* ---------- 插件目录行 ---------- */
+
+.c-plugin-path {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  width: 100%;
+}
+
+.c-plugin-path__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: var(--r-xs);
+  background: var(--surface-sunken);
+  box-shadow: inset 0 0 0 0.5px var(--line-soft);
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-secondary);
+  line-height: 1.4;
+  word-break: break-all;
+  user-select: all;
+}
+
+.c-plugin-path__hint {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+}
+
+/* ---------- 插件条目 ---------- */
+
+.c-plugin-item + .c-plugin-item {
+  box-shadow: inset 0 0.5px 0 var(--line-soft);
+}
+
+/* 停用的整行降透明度 —— 开关也一起淡，靠「淡 = 没在跑」这一条读数 */
+.c-plugin-item.is-off {
+  opacity: 0.58;
+}
+
+.c-plugin-item.is-off:focus-within,
+.c-plugin-item.is-off:hover {
+  opacity: 0.78;
+}
+
+.c-plugin-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  padding: var(--s-4) var(--s-7);
+}
+
+.c-plugin-row__main {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  outline: none;
+}
+
+.c-plugin-row__main:focus-visible {
+  border-radius: var(--r-sm);
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+.c-plugin-row__icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  background: var(--surface-well);
+  color: var(--text-secondary);
+}
+
+.c-plugin-row__text {
+  min-width: 0;
+  flex: 1;
+}
+
+.c-plugin-row__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  row-gap: 2px;
+  min-width: 0;
+}
+
+.c-plugin-row__name {
+  /* 给名称留一个下限：空间紧张时先换行放徽标，而不是把名字压成 0 宽 */
+  flex: 0 1 auto;
+  min-width: 4em;
+  max-width: 100%;
+  font-size: var(--fs-13);
+  font-weight: 500;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-plugin-row__ver {
+  flex: none;
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 徽标在标题行里必须整块保留：默认的 flex-shrink 会把「加载失败」挤成竖排 */
+.c-plugin-row__title .c-badge {
+  flex: none;
+  white-space: nowrap;
+}
+
+.c-plugin-row__desc {
+  margin-top: 1px;
+  font-size: var(--fs-11);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  letter-spacing: var(--tracking-caption);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 出错时把摘要顶到描述位：收起状态也能看到「为什么挂」 */
+.c-plugin-row__desc.is-error {
+  color: var(--danger);
+}
+
+.c-plugin-row__aside {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  flex: none;
+}
+
+.c-plugin-row__chev {
+  display: grid;
+  place-items: center;
+  color: var(--text-quaternary);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.c-plugin-row__chev[data-open="1"] {
+  transform: rotate(180deg);
+}
+
+/* 拨动中：变淡 + 不吃点击，避免连点打进两次 enable */
+.c-switch[data-busy] {
+  opacity: 0.45;
+  pointer-events: none;
+  cursor: progress;
+}
+
+/* ---------- 详情 ---------- */
+
+.c-plugin-detail {
+  margin: 0 var(--s-7);
+  padding-bottom: var(--s-5);
+  box-shadow: inset 0 0.5px 0 var(--line-soft);
+}
+
+.c-plugin-detail[hidden] {
+  display: none;
+}
+
+.c-plugin-detail__row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: var(--s-3);
+  padding: 3px 0;
+  font-size: var(--fs-12);
+  line-height: 1.5;
+}
+
+.c-plugin-detail__key {
+  color: var(--text-tertiary);
+}
+
+.c-plugin-detail__value {
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.c-plugin-detail__value--mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+}
+
+.c-plugin-error {
+  margin-top: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--fs-12);
+  line-height: 1.5;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* ---------- 授权弹窗里的权限行 ---------- */
+
+.c-plugin-perm {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--s-3) 0;
+}
+
+.c-plugin-perm + .c-plugin-perm {
+  box-shadow: inset 0 0.5px 0 var(--line-soft);
+}
+
+.c-plugin-perm__name {
+  font-size: var(--fs-13);
+  color: var(--text-primary);
+}
+
+.c-plugin-perm__desc {
+  font-size: var(--fs-11);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+
+/* ---------- 底部 ---------- */
+
+.c-plugin-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-4);
+  padding: 0 var(--s-2);
+}
+
+.c-plugin-foot__hint {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+}
+
+/* ---------- Ctrl+P 里的命令行 ---------- */
+
+/* 命令和笔记同列一张表时靠图标色区分：命令是「动作」，笔记是「文件」 */
+.ink-qs-item--command .ink-qs-item__icon {
+  color: var(--accent);
+  opacity: 1;
+}
+
+/* ---------- 右侧栏里的插件面板 ---------- */
+
+/*
+   Inspector 的 body 默认整体滚动，适合大纲/属性这类平铺内容。
+   AI 对话需要「消息流自己滚、输入框钉在底部」，所以只在 AI 视图激活时
+   关掉外层滚动，并让 pane / view 撑满整格。选择器只命中 ai.chat，
+  不会影响其它右侧栏视图。
+*/
+.c-inspector__pane[data-pane="ai.chat"] {
+  height: 100%;
+  min-height: 0;
+}
+
+.c-inspector__pane[data-pane="ai.chat"] > .ink-view {
+  height: 100%;
+  min-height: 0;
+}
+
+.c-inspector__body:has(> .c-inspector__pane[data-pane="ai.chat"][data-active="1"]) {
+  overflow: hidden;
+  padding-bottom: 0;
+}
+

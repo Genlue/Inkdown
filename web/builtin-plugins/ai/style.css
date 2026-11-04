@@ -1,0 +1,940 @@
+/* ==========================================================================
+   AI 助手 · 样式
+   只消费 c-* 类与 var(--*) 令牌；圆角一律从 --r-* 阶梯取，不写字面色值。
+
+   两份界面：
+   - 右侧栏对话（.c-ai-chat）：宽度由 Inspector 决定（280px，可拖到 220–460），
+     所有尺寸按「最窄 220px」也能用过来设计；
+   - 整页设置与历史（.c-ai-page）：沿用宿主的 .c-page-host 容器。
+   ========================================================================== */
+
+/* ==========================================================================
+   一、整页：设置与历史
+   ========================================================================== */
+
+.c-ai-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.c-ai-page__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-7);
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: var(--s-9) var(--s-8) 60px;
+}
+
+.c-ai-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.c-ai-block[hidden] {
+  display: none;
+}
+
+/* ---------- 顶部 ---------- */
+
+.c-ai-hero {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: 0 var(--s-2);
+}
+
+.c-ai-hero__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+}
+
+.c-ai-hero__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-22);
+  font-weight: 600;
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-title);
+  color: var(--text-primary);
+}
+
+.c-ai-hero__sub {
+  max-width: 60ch;
+  font-size: var(--fs-12);
+  line-height: 1.55;
+  color: var(--text-tertiary);
+  letter-spacing: var(--tracking-caption);
+}
+
+.c-ai-hero__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-4);
+  padding-top: var(--s-3);
+}
+
+/* ---------- 状态与提示 ---------- */
+
+.c-ai-status {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-11);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  word-break: break-word;
+  user-select: text;
+}
+
+.c-ai-status[data-tone="ok"] {
+  color: var(--success);
+}
+
+.c-ai-status[data-tone="danger"] {
+  color: var(--danger);
+}
+
+.c-ai-muted {
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.c-ai-warn {
+  margin: var(--s-2) var(--s-7) var(--s-5);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  color: var(--text-secondary);
+  font-size: var(--fs-11);
+  line-height: 1.55;
+  letter-spacing: var(--tracking-caption);
+  user-select: text;
+}
+
+.c-ai-test {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  padding: var(--s-4) var(--s-7);
+  box-shadow: inset 0 0.5px 0 var(--line-soft);
+}
+
+/* ---------- 历史 ---------- */
+
+.c-ai-history {
+  display: flex;
+  flex-direction: column;
+}
+
+.c-ai-history__item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-4);
+  padding: var(--s-4) var(--s-7);
+}
+
+.c-ai-history__item + .c-ai-history__item {
+  box-shadow: inset 0 0.5px 0 var(--line-soft);
+}
+
+.c-ai-history__item.is-reverted {
+  opacity: 0.62;
+}
+
+.c-ai-history__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.c-ai-history__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  min-width: 0;
+}
+
+.c-ai-history__time {
+  flex: none;
+  font-size: var(--fs-11);
+  color: var(--text-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+
+.c-ai-history__title {
+  flex: 0 1 auto;
+  max-width: 22em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-12);
+  color: var(--text-primary);
+}
+
+.c-ai-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--s-3);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+  background: var(--surface-well);
+}
+
+.c-ai-history__summary {
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-11);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  letter-spacing: var(--tracking-caption);
+  user-select: text;
+}
+
+/* ---------- 空状态 ---------- */
+
+.c-ai-empty {
+  padding: var(--s-9) var(--s-7);
+  text-align: center;
+}
+
+.c-ai-empty__title {
+  font-size: var(--fs-13);
+  color: var(--text-secondary);
+}
+
+.c-ai-empty__desc {
+  max-width: 46ch;
+  margin: var(--s-2) auto 0;
+  font-size: var(--fs-11);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+/* ==========================================================================
+   二、右侧栏对话
+   ========================================================================== */
+
+.c-ai-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---------- 头部 ---------- */
+
+.c-ai-chat__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-2) 0;
+}
+
+.c-ai-chat__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-13);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: var(--tracking-title);
+  color: var(--text-primary);
+}
+
+.c-ai-chat__gear {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-15);
+  line-height: 1;
+  font-variant-emoji: text;
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
+}
+
+.c-ai-chat__gear:hover {
+  color: var(--text-primary);
+  background: var(--surface-control-hover);
+}
+
+.c-ai-chat__gear:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
+/* ---------- 上下文条 ---------- */
+
+.c-ai-chat__ctx {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-2) var(--s-3);
+}
+
+.c-ai-ctx__empty {
+  font-size: var(--fs-11);
+  line-height: 1.4;
+  color: var(--text-quaternary);
+}
+
+.c-ai-ctx__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  max-width: 100%;
+  height: 22px;
+  padding: 0 var(--s-1) 0 var(--s-4);
+  border-radius: var(--r-pill);
+  background: var(--surface-well);
+  color: var(--text-secondary);
+  font-size: var(--fs-11);
+  line-height: 1;
+}
+
+.c-ai-ctx__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c-ai-ctx__tag {
+  flex: none;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-pill);
+  background: var(--surface-control);
+  color: var(--text-tertiary);
+  font-size: var(--fs-11);
+  line-height: 16px;
+}
+
+.c-ai-ctx__x {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: inherit;
+  font-size: var(--fs-13);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.c-ai-ctx__x:hover {
+  color: var(--text-primary);
+  background: var(--surface-control-hover);
+}
+
+.c-ai-ctx__add {
+  height: 22px;
+  padding: 0 var(--s-4);
+  border: 0.5px dashed var(--line-strong);
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: inherit;
+  font-size: var(--fs-11);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.c-ai-ctx__add:hover {
+  color: var(--text-secondary);
+  border-color: var(--text-quaternary);
+}
+
+/* ---------- 消息流 ---------- */
+
+.c-ai-chat__flow {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: var(--s-3) var(--s-2) var(--s-5);
+}
+
+.c-ai-msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.c-ai-msg--user {
+  align-items: flex-end;
+}
+
+.c-ai-msg--bot {
+  align-items: stretch;
+}
+
+.c-ai-msg__bubble {
+  max-width: 88%;
+  padding: var(--s-4) var(--s-5);
+  border-radius: var(--r-md) var(--r-md) var(--r-xs) var(--r-md);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  font-size: var(--fs-12);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.c-ai-msg__md {
+  min-width: 0;
+  padding: var(--s-4) var(--s-5);
+  border-radius: var(--r-md);
+  background: var(--surface-card);
+  box-shadow: inset 0 0 0 0.5px var(--line-soft);
+  color: var(--text-primary);
+  font-size: var(--fs-12);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.c-ai-msg__error {
+  color: var(--danger);
+  font-size: var(--fs-12);
+  line-height: 1.55;
+}
+
+.c-ai-chat__muted {
+  margin: 0;
+  color: var(--text-tertiary);
+}
+
+.c-ai-msg__acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-1);
+  padding-left: var(--s-1);
+}
+
+.c-ai-msg__act {
+  padding: 3px var(--s-2);
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: inherit;
+  font-size: var(--fs-11);
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
+}
+
+.c-ai-msg__act:hover:not(:disabled) {
+  color: var(--text-secondary);
+  background: var(--surface-control);
+}
+
+.c-ai-msg__act:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.c-ai-msg__write {
+  padding-left: var(--s-2);
+  font-size: var(--fs-11);
+  line-height: 1.4;
+  color: var(--success);
+}
+
+.c-ai-msg__write[hidden] {
+  display: none;
+}
+
+/* ---------- 流式光标 ---------- */
+
+.c-ai-chat__thinking {
+  color: var(--text-quaternary);
+  font-size: var(--fs-11);
+}
+
+.c-ai-chat__caret {
+  display: inline-block;
+  width: 6px;
+  height: 12px;
+  margin-left: 2px;
+  border-radius: var(--r-xs);
+  background: var(--accent);
+  vertical-align: -2px;
+  animation: c-ai-blink 900ms steps(2, start) infinite;
+}
+
+@keyframes c-ai-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .c-ai-chat__caret {
+    animation: none;
+  }
+}
+
+/* ---------- 空状态 / 未配置 ---------- */
+
+.c-ai-chat__empty,
+.c-ai-chat__gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-3);
+  margin: auto 0;
+  padding: var(--s-7) var(--s-4);
+  text-align: center;
+}
+
+.c-ai-chat__gate {
+  align-items: stretch;
+  padding: var(--s-6) var(--s-5);
+  border-radius: var(--r-md);
+  background: var(--surface-card);
+  box-shadow: inset 0 0 0 0.5px var(--line-soft);
+  text-align: left;
+}
+
+.c-ai-chat__gate-title {
+  font-size: var(--fs-13);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.c-ai-chat__gate-desc {
+  font-size: var(--fs-11);
+  line-height: 1.6;
+  color: var(--text-tertiary);
+}
+
+.c-ai-chat__gate .c-btn {
+  align-self: flex-start;
+}
+
+.c-ai-chat__empty-title {
+  font-size: var(--fs-13);
+  color: var(--text-secondary);
+}
+
+.c-ai-chat__empty-desc {
+  max-width: 32ch;
+  font-size: var(--fs-11);
+  line-height: 1.6;
+  color: var(--text-tertiary);
+}
+
+.c-ai-chat__examples {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  width: 100%;
+  margin-top: var(--s-2);
+}
+
+.c-ai-chat__example {
+  width: 100%;
+  padding: var(--s-3) var(--s-4);
+  border: 0.5px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-card);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--fs-12);
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
+}
+
+.c-ai-chat__example:hover {
+  color: var(--text-primary);
+  background: var(--surface-card-hover);
+}
+
+/* ---------- 输入区 ---------- */
+
+.c-ai-chat__composer {
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-2) var(--s-2);
+  box-shadow: inset 0 0.5px 0 var(--line-soft);
+}
+
+.c-ai-chat__box {
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--surface-card);
+  box-shadow: inset 0 0 0 0.5px var(--line-strong);
+  transition: box-shadow var(--dur-1) var(--ease-out);
+}
+
+.c-ai-chat__box:focus-within {
+  box-shadow: inset 0 0 0 1px var(--accent-ring);
+}
+
+.c-ai-chat__input {
+  display: block;
+  width: 100%;
+  min-height: 34px;
+  max-height: 160px;
+  padding: var(--s-2) 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--fs-12);
+  line-height: 1.55;
+  resize: none;
+}
+
+.c-ai-chat__input::placeholder {
+  color: var(--text-quaternary);
+}
+
+.c-ai-chat__input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.c-ai-chat__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.c-ai-chat__tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  flex: 1;
+  min-width: 0;
+}
+
+.c-ai-chat__tool {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
+}
+
+.c-ai-chat__tool:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--surface-control-hover);
+}
+
+.c-ai-chat__tool:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.c-ai-chat__send {
+  flex: none;
+}
+
+/* ---------- 斜杠 / @ 弹层 ---------- */
+
+.c-ai-chat__pop {
+  position: absolute;
+  left: var(--s-2);
+  right: var(--s-2);
+  bottom: calc(100% + var(--s-2));
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(300px, 54vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--s-2);
+  border-radius: var(--r-md);
+  background: var(--surface-elevated);
+  box-shadow: 0 8px 28px var(--line-strong), inset 0 0 0 0.5px var(--line);
+}
+
+.c-ai-chat__pop[hidden] {
+  display: none;
+}
+
+.c-ai-chat__pop-item {
+  display: block;
+  width: 100%;
+  padding: var(--s-3) var(--s-4);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.c-ai-chat__pop-item:hover,
+.c-ai-chat__pop-item.is-active {
+  background: var(--surface-control);
+}
+
+.c-ai-chat__pop-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.c-ai-chat__pop-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-12);
+  color: var(--text-primary);
+}
+
+.c-ai-chat__pop-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+}
+
+.c-ai-chat__pop-note {
+  padding: var(--s-4);
+  font-size: var(--fs-11);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+/* ---------- 助手消息里的 Markdown ---------- */
+
+.c-ai-msg__md > :first-child {
+  margin-top: 0;
+}
+
+.c-ai-msg__md > :last-child {
+  margin-bottom: 0;
+}
+
+.c-ai-msg__md p {
+  margin: 0 0 var(--s-3);
+}
+
+.c-ai-msg__md h1,
+.c-ai-msg__md h2,
+.c-ai-msg__md h3,
+.c-ai-msg__md h4,
+.c-ai-msg__md h5,
+.c-ai-msg__md h6 {
+  margin: var(--s-4) 0 var(--s-2);
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: var(--tracking-title);
+  color: var(--text-primary);
+}
+
+.c-ai-msg__md h1 {
+  font-size: var(--fs-15);
+}
+
+.c-ai-msg__md h2 {
+  font-size: var(--fs-13);
+}
+
+.c-ai-msg__md h3,
+.c-ai-msg__md h4,
+.c-ai-msg__md h5,
+.c-ai-msg__md h6 {
+  font-size: var(--fs-12);
+}
+
+.c-ai-msg__md ul,
+.c-ai-msg__md ol {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 var(--s-3);
+  padding-left: 1.3em;
+}
+
+.c-ai-msg__md li::marker {
+  color: var(--text-tertiary);
+}
+
+.c-ai-msg__md blockquote {
+  margin: 0 0 var(--s-3);
+  padding: var(--s-1) 0 var(--s-1) var(--s-4);
+  border-left: 2px solid var(--line-strong);
+  color: var(--text-secondary);
+}
+
+.c-ai-msg__md code {
+  padding: 1px 4px;
+  border-radius: var(--r-xs);
+  background: var(--surface-well);
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+}
+
+.c-ai-msg__md .md-code {
+  margin: 0 0 var(--s-3);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  box-shadow: inset 0 0 0 0.5px var(--line-soft);
+  overflow: hidden;
+}
+
+.c-ai-msg__md .md-code__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  box-shadow: inset 0 -0.5px 0 var(--line-soft);
+}
+
+.c-ai-msg__md .md-code__lang {
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  color: var(--text-tertiary);
+}
+
+/* 代码块的复制按钮依赖预览区的点击委托，这外面用消息底部的「复制」 */
+.c-ai-msg__md .md-code__copy {
+  display: none;
+}
+
+.c-ai-msg__md .md-code pre {
+  margin: 0;
+  padding: var(--s-4);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.c-ai-msg__md .md-code pre code {
+  padding: 0;
+  background: transparent;
+  font-size: var(--fs-11);
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.c-ai-msg__md .md-table {
+  margin: 0 0 var(--s-3);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.c-ai-msg__md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-11);
+}
+
+.c-ai-msg__md th,
+.c-ai-msg__md td {
+  padding: var(--s-2) var(--s-3);
+  border: 0.5px solid var(--line);
+  text-align: left;
+}
+
+.c-ai-msg__md th {
+  background: var(--surface-well);
+  font-weight: 600;
+}
+
+.c-ai-msg__md a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.c-ai-msg__md a:hover {
+  text-decoration: underline;
+}
+
+.c-ai-msg__md hr {
+  height: 0.5px;
+  margin: var(--s-4) 0;
+  border: none;
+  background: var(--line);
+}
+
+.c-ai-msg__md img {
+  max-width: 100%;
+  border-radius: var(--r-sm);
+}
+
+.c-ai-msg__md del {
+  color: var(--text-tertiary);
+}
+
+.c-ai-msg__md .md-task {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+}
+
+.c-ai-msg__md .md-task input {
+  margin-top: 3px;
+}
+
+/* ==========================================================================
+   三、窄屏（整页设置）
+   ========================================================================== */
+
+@media (max-width: 640px) {
+  .c-ai-page__body {
+    padding: var(--s-7) var(--s-5) 48px;
+  }
+}

@@ -254,10 +254,20 @@ export class TauriFS {
     return this.invoke('vault_walk');
   }
 
+  /**
+   * 列一层目录。
+   *
+   * 必须和 LocalFS.list() 返回同一个形状 —— walk() 的条目只有 path/type/mtime，
+   * 少了 name。插件宿主是按 name 取目录名的，先前这里漏了它，
+   * 桌面端就把目录名读成 undefined，转而去读 plugins/undefined/manifest.json，
+   * 报「缺少 manifest.json」；浏览器走 LocalFS 所以一直正常。
+   */
   async list(rel) {
     const all = await this.walk();
     const dir = norm(rel);
-    return all.filter((entry) => dirname(entry.path) === dir);
+    return all
+      .filter((entry) => dirname(entry.path) === dir)
+      .map((entry) => ({ ...entry, name: basename(entry.path) }));
   }
 }
 

@@ -8,7 +8,12 @@ import { h, clamp, onOutside } from '../core/dom.js';
 import { icon, iconEl } from '../core/icons.js';
 import { spring, springValue } from '../core/spring.js';
 import { mountRefraction } from '../core/refraction.js';
-import { mountGlassLens, disposeGlassTree } from '../core/glass-lens.js';
+import {
+  mountGlassLens,
+  disposeGlassTree,
+  beginGlassInteraction,
+  endGlassInteraction,
+} from '../core/glass-lens.js';
 import { theme } from '../core/theme.js';
 
 /**
@@ -67,11 +72,13 @@ export function IconButton({
   onClick,
   className = '',
 } = {}) {
+  // 外观只由 variant 决定，状态只由 aria-pressed 决定。
+  // 早先 active 会顺手挂上 --on 实心态，于是「开着的开关」和「选中的页」
+  // 长得一模一样，页面只好自己再写一份 .is-on 去盖回来。
   const cls = [
     'c-iconbtn',
     variant && `c-iconbtn--${variant}`,
     size && `c-iconbtn--${size}`,
-    active && 'c-iconbtn--on',
     className,
   ]
     .filter(Boolean)
@@ -3416,6 +3423,9 @@ export function Drawer({
 
   const onDown = (e) => {
     if (e.button !== 0) return;
+    // 多指同时按在抓握带上时不要覆盖上一次的拖动状态，
+    // 否则 beginGlassInteraction 会多计一次、永远回不到完整滤镜
+    if (drag) return;
     const host = vertical ? root.clientHeight : root.clientWidth;
     drag = {
       id: e.pointerId,
@@ -3433,6 +3443,8 @@ export function Drawer({
     swallowClick = false;
     root.dataset.dragging = '1';
     grip.setPointerCapture(e.pointerId);
+    // 抽屉每帧都在移动/改尺寸，玻璃材质切到模糊版；松手或取消时恢复
+    beginGlassInteraction();
     e.preventDefault();
   };
 
@@ -3469,6 +3481,7 @@ export function Drawer({
     const { mode, size0, moved } = drag;
     drag = null;
     delete root.dataset.dragging;
+    endGlassInteraction();
 
     // 没挪动就是一次点击，交给 click 去切换开合
     if (!moved) {
@@ -3533,6 +3546,10 @@ export function Drawer({
   root.body = body;
   root.grip = grip;
   root.dispose = () => {
+    if (drag) {
+      drag = null;
+      endGlassInteraction();
+    }
     disposeGlassTree(sheet);
     root.remove();
   };
@@ -3574,11 +3591,15 @@ export function Resizer({
 
   const onDown = (e) => {
     if (e.button !== 0) return;
+    // 同上：多指按下不重复计数
+    if (drag) return;
     drag = { id: e.pointerId, start: point(e), delta: 0 };
     el.setPointerCapture(e.pointerId);
     el.dataset.active = '1';
     // 拖动期间整页统一光标，鼠标滑出这 9px 也不会变回箭头
     document.documentElement.dataset.resizing = horizontal ? 'y' : 'x';
+    // 栏宽每帧都在变 → 玻璃元素跟着 ResizeObserver；降级期间不重建贴图
+    beginGlassInteraction();
     onDelta?.(0, 'start');
     e.preventDefault();
   };
@@ -3595,6 +3616,7 @@ export function Resizer({
     drag = null;
     delete el.dataset.active;
     delete document.documentElement.dataset.resizing;
+    endGlassInteraction();
     onDelta?.(delta, 'end');
   };
 
@@ -3616,6 +3638,13 @@ export function Resizer({
     onDelta?.(e.key === back ? -step : step, 'key');
   });
 
-  el.dispose = () => el.remove();
+  el.dispose = () => {
+    if (drag) {
+      drag = null;
+      delete document.documentElement.dataset.resizing;
+      endGlassInteraction();
+    }
+    el.remove();
+  };
   return el;
 }

@@ -40,6 +40,8 @@ import {
   Row,
   Swatches,
   Inspector,
+  SearchField,
+  Dialog,
   toast,
   openMenu,
   openPopover,
@@ -56,6 +58,7 @@ import { resolveMarkdownImages } from './markdown.js';
 import { getFileType, getFileExt, isMarkdown, basename, dirname, listVaults, setActiveVaultId } from './vault/fs.js';
 import { renderMarkdown } from './markdown.js';
 import { Vault } from './vault/vault.js';
+import { connectVaultWatch } from './vault/watch.js';
 import {
   registerSidebarView,
   getSidebarViews,
@@ -66,6 +69,10 @@ import { infoView } from './sidebar/info-view.js';
 import { relationsView } from './sidebar/relations-view.js';
 import { buildIndex, findBacklinks, findOutlinks } from './vault/links.js';
 import { relTime, charCount, lineCount, lineOffset } from './util.js';
+import { PluginHost } from './plugins/host.js';
+import { connect as connectPlugins, snapshot as pluginSnapshot, commands as pluginCommands } from './plugins/registry.js';
+import { emit as emitPluginEvent } from './plugins/events.js';
+import { createPluginsView } from './views/plugins-view.js';
 
 /* ---------------- 启动 ---------------- */
 
@@ -96,6 +103,8 @@ const state = {
   page: 'files',
   current: '',
   currentView: 'note',
+  pluginPage: '',
+  pluginLabel: '',
   query: '',
   searchResults: null,
   sort: ['updated', 'created', 'title'].includes(vault.workspace.sort)
@@ -203,7 +212,7 @@ applyEditorSize();
 
 /* ---------------- 顶栏 ---------------- */
 
-const navToggle = IconButton({ icon: 'panel-left', label: '收起导航栏' });
+const navToggle = IconButton({ icon: 'panel-left', label: '收起导航栏', toggle: true, active: true });
 function toggleNav(force) {
   const isHidden = app.classList.contains('l-app--nav-hidden');
   const willHide = typeof force === 'boolean' ? force : !isHidden;
@@ -214,6 +223,8 @@ function toggleNav(force) {
     const label = willHide ? '展开导航栏' : '收起导航栏';
     navToggle.setAttribute('aria-label', label);
     navToggle.title = label;
+    // 两态：开着 = 强调色，收起 = 中性。颜色由 .c-iconbtn[aria-pressed] 统一给
+    navToggle.setAttribute('aria-pressed', String(!willHide));
     vault.patchWorkspace({ navHidden: willHide });
   }
 }
@@ -230,7 +241,8 @@ function setList(open, { persist = true } = {}) {
   const label = value ? '收起文件列表' : '展开文件列表';
   filesBtn.title = label;
   filesBtn.setAttribute('aria-label', label);
-  filesBtn.setAttribute('aria-pressed', String(!value));
+  // 按下 = 这一列现在是展开的。反过来写会让「收起」亮着强调色，语义刚好拧了
+  filesBtn.setAttribute('aria-pressed', String(value));
 
   if (persist) vault.patchWorkspace({ listHidden: !value });
 }
@@ -266,6 +278,7 @@ theme.subscribe(() => {
   syncThemeBtn();
   // 系统材质（DWM Acrylic）按窗口主题染色，必须跟着 CSS 主题一起切
   setWindowTheme(theme.resolved);
+  emitPluginEvent('theme:change', { mode: theme.resolved, accent: theme.accent });
   if (applyingTheme) return;
   vault.patchSettings({ appearance: { mode: theme.mode, accent: theme.accent } });
 });
@@ -283,13 +296,54 @@ settingsBtn.addEventListener('click', () => {
 });
 
 async function openSettingsTab() {
-  await commitDoc();
+  await commitDoc({ force: true });
   state.currentView = 'settings';
   viewHost.switchView({
     id: 'settings',
     label: '偏好设置',
     icon: 'sliders',
     type: 'settings',
+  });
+  refreshNav();
+  updateTopbar();
+}
+
+/** 插件页。页面本身由 views/plugins-view.js 提供，宿主只负责把它塞进 ViewHost */
+async function openPluginsTab() {
+  await titleTask;
+  await commitDoc({ force: true });
+  state.currentView = 'plugins';
+  state.pluginPage = '';
+  await viewHost.switchView({
+    id: 'plugins',
+    label: '插件',
+    icon: 'puzzle',
+    type: 'page',
+    mount: (host) =>
+      createPluginsView({
+        vault,
+        host: pluginHost,
+        container: host,
+        onOpenInExplorer: (p) => openInExplorer(p),
+      }),
+  });
+  refreshNav();
+  updateTopbar();
+}
+
+/** 插件注册的整页视图（ctx.ui.page）统一从这里打开 */
+async function openPluginPage(tab) {
+  await titleTask;
+  await commitDoc({ force: true });
+  state.currentView = 'plugin';
+  state.pluginPage = tab.id;
+  state.pluginLabel = tab.title || tab.label || tab.id;
+  await viewHost.switchView({
+    id: tab.id,
+    label: state.pluginLabel,
+    icon: tab.icon || 'puzzle',
+    type: 'page',
+    mount: tab.mount,
   });
   refreshNav();
   updateTopbar();
@@ -338,164 +392,159 @@ const quickSwitcherBtn = IconButton({ icon: 'search', label: '快速打开 (Ctrl
 const quickSwitcherCapsule = Capsule({ round: true, children: quickSwitcherBtn });
 
 function openQuickSwitcher() {
-  const existing = document.querySelector('.ink-qs-overlay');
-  if (existing) {
-    existing.remove();
-    return;
-  }
+  // 已经开着一层就把焦点还回去，不叠第二层
+  if (document.querySelector('.c-dialog-scrim')) return;
 
   const allNotes = vault.flatNotes();
   let selectedIndex = 0;
   let currentResults = [];
+  let rows = [];
+  let closed = false;
 
-  const input = h('input', {
-    class: 'ink-qs-input',
-    placeholder: '输入笔记名称跳转或创建 (↑↓ 选择，Enter 打开，Esc 退出)...',
-    spellcheck: 'false',
+  const list = h('div', { class: 'c-list ink-qs__list', role: 'listbox' });
+  const field = SearchField({
+    placeholder: '搜索笔记或命令…',
+    width: '100%',
+    onInput: (value) => renderResults(value),
   });
 
-  const list = h('div', { class: 'ink-qs-list' });
-
-  function renderResults(q) {
-    const query = q.trim().toLowerCase();
-    selectedIndex = 0;
-    list.innerHTML = '';
-
-    if (!query) {
-      currentResults = allNotes.slice(0, 15).map(n => ({ type: 'note', note: n }));
-    } else {
-      const matches = allNotes.filter(n =>
-        (n.title || n.name).toLowerCase().includes(query) ||
-        n.path.toLowerCase().includes(query)
-      );
-      currentResults = matches.slice(0, 20).map(n => ({ type: 'note', note: n }));
-
-      const exact = matches.some(n => (n.title || n.name).toLowerCase() === query);
-      if (!exact) {
-        currentResults.push({ type: 'create', name: q.trim() });
-      }
-    }
-
-    if (currentResults.length === 0) {
-      currentResults.push({ type: 'create', name: q.trim() });
-    }
-
-    currentResults.forEach((item, idx) => {
-      let row;
-      if (item.type === 'note') {
-        row = h(
-          'div',
-          {
-            class: 'ink-qs-item ' + (idx === selectedIndex ? 'is-selected' : ''),
-            onclick: () => choose(item),
-          },
-          h(
-            'div',
-            { class: 'ink-qs-item__left' },
-            h('span', { class: 'ink-qs-item__icon', html: icon('file-text', 14) }),
-            h('span', { class: 'ink-qs-item__title' }, item.note.title || item.note.name)
-          ),
-          h('span', { class: 'ink-qs-item__path' }, dirname(item.note.path) || '根目录')
-        );
-      } else {
-        row = h(
-          'div',
-          {
-            class: 'ink-qs-item ink-qs-item--create ' + (idx === selectedIndex ? 'is-selected' : ''),
-            onclick: () => choose(item),
-          },
-          h(
-            'div',
-            { class: 'ink-qs-item__left' },
-            h('span', { class: 'ink-qs-item__icon', html: icon('plus', 14) }),
-            h('span', { class: 'ink-qs-item__title' }, '创建新笔记「' + item.name + '」')
-          )
-        );
-      }
-      list.append(row);
-    });
-  }
+  const dlg = Dialog({
+    title: '快速打开',
+    desc: '↑↓ 选择 · Enter 打开 · Esc 退出',
+    icon: 'search',
+    width: '560px',
+    body: h('div', { class: 'ink-qs' }, field, list),
+    onClose: () => {
+      closed = true;
+      document.removeEventListener('keydown', onKey, true);
+    },
+  });
 
   function choose(item) {
-    overlay.remove();
+    dlg.close();
     if (!item) return;
     if (item.type === 'note') {
       openNote(item.note.path);
+    } else if (item.type === 'command') {
+      try {
+        Promise.resolve(item.command.run()).catch((err) => {
+          console.warn('[plugins] 命令执行失败', err);
+          toast(String(err?.message || err), { icon: 'x-circle', tone: 'danger' });
+        });
+      } catch (err) {
+        console.warn('[plugins] 命令执行失败', err);
+        toast(String(err?.message || err), { icon: 'x-circle', tone: 'danger' });
+      }
     } else if (item.type === 'create') {
-      vault.createNote(state.selectedDir || 'Notes', item.name).then(newPath => {
+      vault.createNote(state.selectedDir || 'Notes', item.name).then((newPath) => {
         renderAll().then(() => openNote(newPath));
         toast('已创建「' + item.name + '」');
       });
     }
   }
 
-  function updateActive() {
-    const rows = list.querySelectorAll('.ink-qs-item');
-    rows.forEach((r, i) => {
-      r.classList.toggle('is-selected', i === selectedIndex);
-      if (i === selectedIndex) {
-        r.scrollIntoView({ block: 'nearest' });
-      }
+  /** 一行就是控件库里的一行，不要自己拼 div */
+  function buildRow(item, idx) {
+    const selected = idx === selectedIndex;
+    if (item.type === 'note') {
+      return ListRow({
+        icon: 'file-text',
+        title: item.note.title || item.note.name,
+        meta: dirname(item.note.path) || '根目录',
+        selected,
+        onClick: () => choose(item),
+      });
+    }
+    if (item.type === 'command') {
+      return ListRow({
+        icon: item.command.icon || 'corner-down-right',
+        title: item.command.title,
+        meta: '命令',
+        className: 'ink-qs__row--command',
+        selected,
+        onClick: () => choose(item),
+      });
+    }
+    return ListRow({
+      icon: 'plus',
+      title: '创建「' + item.name + '」',
+      meta: '新建',
+      selected,
+      onClick: () => choose(item),
     });
   }
 
-  input.addEventListener('input', () => {
-    renderResults(input.value);
-  });
+  function renderResults(raw) {
+    if (closed) return;
+    const text = String(raw || '');
+    const query = text.trim().toLowerCase();
+    selectedIndex = 0;
 
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      if (currentResults.length > 0) {
-        selectedIndex = (selectedIndex + 1) % currentResults.length;
-        updateActive();
-      }
-      return;
+    // 插件命令和笔记同列一张表：Ctrl+P 是「找一个动作」，不该分成两个入口。
+    // scope 为 'editor' 的命令只在打开笔记时出现（比如「整理选中文本」）。
+    const cmds = pluginCommands().filter((cmd) => {
+      if (cmd.scope === 'editor' && state.currentView !== 'note') return false;
+      if (!query) return true;
+      return (
+        String(cmd.title || '').toLowerCase().includes(query) ||
+        String(cmd.id || '').toLowerCase().includes(query)
+      );
+    });
+
+    if (!query) {
+      currentResults = allNotes.slice(0, 12).map((n) => ({ type: 'note', note: n }));
+      currentResults.push(...cmds.slice(0, 8).map((c) => ({ type: 'command', command: c })));
+    } else {
+      const matches = allNotes.filter(
+        (n) =>
+          (n.title || n.name).toLowerCase().includes(query) ||
+          n.path.toLowerCase().includes(query)
+      );
+      currentResults = matches.slice(0, 18).map((n) => ({ type: 'note', note: n }));
+      currentResults.push(...cmds.slice(0, 8).map((c) => ({ type: 'command', command: c })));
+
+      const exact = matches.some((n) => (n.title || n.name).toLowerCase() === query);
+      if (!exact) currentResults.push({ type: 'create', name: text.trim() });
     }
-    if (e.key === 'ArrowUp') {
+
+    if (currentResults.length === 0) currentResults.push({ type: 'create', name: text.trim() });
+
+    rows = [];
+    fill(
+      list,
+      ...currentResults.map((item, idx) => {
+        const row = buildRow(item, idx);
+        rows.push(row);
+        return row;
+      })
+    );
+  }
+
+  function updateActive() {
+    rows.forEach((row, i) => row.setAttribute('aria-selected', String(i === selectedIndex)));
+    rows[selectedIndex]?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function onKey(e) {
+    if (closed) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!currentResults.length) return;
       e.preventDefault();
-      if (currentResults.length > 0) {
-        selectedIndex = (selectedIndex - 1 + currentResults.length) % currentResults.length;
-        updateActive();
-      }
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      selectedIndex = (selectedIndex + step + currentResults.length) % currentResults.length;
+      updateActive();
       return;
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      if (currentResults[selectedIndex]) {
-        choose(currentResults[selectedIndex]);
-      }
-      return;
+      e.stopPropagation();
+      choose(currentResults[selectedIndex]);
     }
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      overlay.remove();
-      return;
-    }
-  });
+  }
 
-  const dialog = h(
-    'div',
-    { class: 'ink-qs-dialog', onclick: (e) => e.stopPropagation() },
-    h(
-      'div',
-      { class: 'ink-qs-head' },
-      h('span', { html: icon('search', 16) }),
-      input
-    ),
-    list,
-    h(
-      'div',
-      { class: 'ink-qs-foot' },
-      h('span', null, '↑↓ 移动光标 · ↵ 打开或创建 · Esc 退出'),
-      h('span', null, allNotes.length + ' 篇笔记')
-    )
-  );
-
-  const overlay = h('div', { class: 'ink-qs-overlay', onclick: () => overlay.remove() }, dialog);
-  document.body.append(overlay);
+  document.addEventListener('keydown', onKey, true);
   renderResults('');
-  setTimeout(() => input.focus(), 10);
+  requestAnimationFrame(() => field.input.focus());
 }
 
 // 方案 3：纯净流式顶栏 —— 中央面包屑路径 + 大面积窗口拖拽区域
@@ -574,7 +623,26 @@ app.prepend(side);
 
 function refreshNav() {
   const c = vault.counts();
+  // 知识库三项只在「文件 / 收藏 / 回收站」这些内容页选中；
+  // 设置、插件页抢走整块文档区时，它们不该继续亮着
+  const onLibrary =
+    state.currentView !== 'settings' &&
+    state.currentView !== 'plugins' &&
+    state.currentView !== 'plugin';
   const isSettingsActive = state.currentView === 'settings';
+  const isPluginsActive = state.currentView === 'plugins';
+
+  // 插件贡献的导航项由注册表快照驱动 —— 必须和固定项一起进 fill，
+  // 不能 append：下一次刷新整块重建，append 进去的会全被清掉。
+  const contributed = pluginSnapshot().navItems.map((item) =>
+    NavItem({
+      icon: item.icon || 'puzzle',
+      label: item.label,
+      selected: state.currentView === 'plugin' && state.pluginPage === item.id,
+      onClick: (e) => item.onClick?.(e),
+    })
+  );
+
   fill(
     navGroup,
     NavSection({ label: '知识库' }),
@@ -582,7 +650,7 @@ function refreshNav() {
       icon: 'folder-tree',
       label: '文件',
       count: c.all,
-      selected: state.page === 'files' && !isSettingsActive,
+      selected: state.page === 'files' && onLibrary,
       onClick: () => {
         state.currentView = 'note';
         go('files');
@@ -593,7 +661,7 @@ function refreshNav() {
       icon: 'star',
       label: '收藏',
       count: c.favorites,
-      selected: state.page === 'favorites' && !isSettingsActive,
+      selected: state.page === 'favorites' && onLibrary,
       onClick: () => {
         state.currentView = 'note';
         go('favorites');
@@ -603,12 +671,20 @@ function refreshNav() {
       icon: 'trash',
       label: '回收站',
       count: c.trash,
-      selected: state.page === 'trash' && !isSettingsActive,
+      selected: state.page === 'trash' && onLibrary,
       onClick: () => {
         state.currentView = 'note';
         go('trash');
       },
     }),
+    NavSection({ label: '扩展' }),
+    NavItem({
+      icon: 'puzzle',
+      label: '插件',
+      selected: isPluginsActive,
+      onClick: () => openPluginsTab(),
+    }),
+    ...contributed,
     NavSection({ label: '系统' }),
     NavItem({
       icon: 'sliders',
@@ -704,7 +780,7 @@ function openVaultMenu(anchor) {
 }
 
 async function pickFolder() {
-  await commitDoc();
+  await commitDoc({ force: true });
   try {
     const path = await globalThis.__TAURI__.core.invoke('vault_pick');
     if (!path) return;
@@ -718,13 +794,13 @@ async function pickFolder() {
 
 async function switchVault(id) {
   if (id === vault.meta.id) return;
-  await commitDoc();
+  await commitDoc({ force: true });
   setActiveVaultId(id);
   location.reload();
 }
 
 async function createVault() {
-  await commitDoc();
+  await commitDoc({ force: true });
   const next = await Vault.create(`仓库 ${listVaults().length + 1}`);
   setActiveVaultId(next.meta.id);
   location.reload();
@@ -822,12 +898,28 @@ const revealVaultBtn = IconButton({
   onClick: () => openInExplorer(''),
 });
 
+const refreshBtn = IconButton({
+  icon: 'refresh-cw',
+  label: '重新扫描仓库（Ctrl+Alt+R）',
+  size: 'sm',
+  onClick: () => rescanVault({ announce: true }),
+});
+
 listPane.append(
   h(
     'div',
     { class: 'ink-list__head' },
     h('div', { class: 'ink-list__search' }, h('div', { class: 'l-fill' }, search), newNoteBtn, newFolderBtn),
-    h('div', { class: 'ink-list__bar' }, listLabelWrap, h('span', { class: 'l-push' }), foldAllBtn, sortBtn, revealVaultBtn)
+    h(
+      'div',
+      { class: 'ink-list__bar' },
+      listLabelWrap,
+      h('span', { class: 'l-push' }),
+      foldAllBtn,
+      sortBtn,
+      refreshBtn,
+      revealVaultBtn
+    )
   )
 );
 
@@ -1648,6 +1740,215 @@ const noteView = h(
 
 docPane.append(noteView, emptyHost);
 
+/* ---------------- 磁盘变化 ---------------- */
+
+/**
+ * 外部改动提示条：只在「编辑器里有未落盘内容，同时磁盘被改了」时出现。
+ * 不遮正文、不抢焦点，两个按钮把选择权交给用户。
+ */
+const fsBanner = h(
+  'div',
+  { class: 'ink-doc__banner', hidden: true, role: 'status' },
+  h('span', { class: 'ink-doc__banner-text' }, '磁盘上的文件已变化'),
+  h(
+    'div',
+    { class: 'ink-doc__banner-actions' },
+    Button({
+      label: '重新载入',
+      size: 'sm',
+      variant: 'tonal',
+      onClick: () => reloadFromDisk(),
+    }),
+    Button({
+      label: '保留我的修改',
+      size: 'sm',
+      variant: 'plain',
+      onClick: () => {
+        hideFsBanner();
+        // 提示条没了，但改动仍未落盘：等下一次输入 / Ctrl+S 覆盖磁盘
+        setSaveState(hasUnsavedEdit() ? 'unsaved' : 'saved');
+      },
+    })
+  )
+);
+// 挂在标题区末尾：跟着 docHead 在编辑/预览两个滚动容器之间搬，
+// 不会浮在标题上，也不会挡住正文
+docHead.append(fsBanner);
+
+function hideFsBanner() {
+  fsBanner.hidden = true;
+}
+
+/** 编辑器里有没有还没写回磁盘的内容（正文或标题） */
+function hasUnsavedEdit() {
+  const note = currentNote();
+  if (!note) return false;
+  if (editor.value !== lastLoaded) return true;
+  // 标题是失焦才提交的：正在改名时也算脏，别被一次静默重载抹掉
+  const title = titleInput.value.trim();
+  return Boolean(title) && title !== note.title;
+}
+
+/** 静默把磁盘内容铺回编辑器：滚动位置和光标位置大致保留 */
+function applyDiskContent(text) {
+  const note = currentNote();
+  if (!note) return;
+
+  const editTop = editorScroll.scrollTop;
+  const previewTop = previewScroll.scrollTop;
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+
+  editor.value = text;
+  lastLoaded = text;
+  docPane.dataset.empty = '0';
+  titleInput.value = note.title;
+  renderPreview({ content: text, title: note.title });
+  updateMeta(note);
+  updateStar(note);
+  updateStats(text);
+  setSaveState('saved');
+  syncDocHead();
+  resizeEditor();
+
+  // 光标按字符位置夹到新长度；滚动位置原样还回去，别把读者甩回开头
+  const max = text.length;
+  editor.setSelectionRange(Math.min(start, max), Math.min(end, max));
+  editorScroll.scrollTop = editTop;
+  previewScroll.scrollTop = previewTop;
+  refreshActiveView();
+}
+
+async function reloadFromDisk() {
+  const note = currentNote();
+  hideFsBanner();
+  if (!note) return;
+  const text = await vault.readNote(note.path, { fresh: true });
+  applyDiskContent(text);
+  rebuildIndexSoon();
+  toast('已重新载入磁盘上的版本', { icon: 'check' });
+}
+
+/** 目录展开状态：被删掉的路径要清掉，否则重建树时还留着幽灵目录 */
+function pruneExpanded() {
+  const dirs = new Set(vault.entries.filter((e) => e.type === 'dir').map((e) => e.path));
+  let removed = false;
+  for (const path of [...state.expanded]) {
+    if (!dirs.has(path)) {
+      state.expanded.delete(path);
+      removed = true;
+    }
+  }
+  if (removed) vault.patchWorkspace({ expanded: [...state.expanded] });
+}
+
+/**
+ * 重扫仓库并刷新列表。故意不动正文：
+ * 手动刷新、窗口聚焦、文件监听都走这条路，正在编辑的笔记不会被切走。
+ */
+async function rescanVault({ announce = false } = {}) {
+  if (rescanVault.busy) return;
+  rescanVault.busy = true;
+  const startedAt = performance.now();
+  refreshBtn.classList.add('is-spinning');
+
+  try {
+    await vault.refresh(state.sort);
+    pruneExpanded();
+    renderList();
+    refreshNav();
+    renderRecents();
+    updateTopbar();
+    rebuildIndexSoon();
+    if (announce) toast('已与磁盘同步', { icon: 'check' });
+  } catch (err) {
+    console.warn('[watch] 扫描仓库失败', err);
+    if (announce) toast('重新扫描失败: ' + err, { icon: 'x-circle', tone: 'danger' });
+  } finally {
+    // 至少转满一圈：磁盘太快时也能看见反馈，而不是闪一下
+    const rest = 450 - (performance.now() - startedAt);
+    setTimeout(() => {
+      refreshBtn.classList.remove('is-spinning');
+      rescanVault.busy = false;
+    }, Math.max(0, rest));
+  }
+}
+
+/** 当前笔记被移出仓库（删除 / 改名 / 移动）后关掉文档区 */
+async function closeMissingNote() {
+  hideFsBanner();
+  state.current = '';
+  state.currentView = 'note';
+  vault.patchWorkspace({ lastNote: '' });
+  // 空状态层是不透明的，会盖住原来那个已经失效的视图
+  await renderAll();
+  toast('这篇笔记已被移出仓库', { icon: 'info' });
+}
+
+/**
+ * 收 Rust 侧的 vault://fs-change。顺序很重要：
+ * 1) 先刷新列表（轻量）
+ * 2) 再单独判断当前笔记：正文只在必要时改，编辑中的内容绝不覆盖
+ */
+async function handleFsChange(payload = {}) {
+  const paths = Array.isArray(payload.paths) ? payload.paths.filter(Boolean) : [];
+  if (!paths.length) return;
+
+  // 自己刚写完磁盘 / 正在应用外部内容时，收到的是回声
+  if (syncLock > 0) return;
+
+  const onLibrary = state.page !== 'trash'
+    && !['settings', 'plugins', 'plugin'].includes(state.currentView);
+
+  syncLock++;
+  try {
+    await vault.refresh(state.sort);
+    pruneExpanded();
+    renderList();
+    refreshNav();
+    renderRecents();
+    updateTopbar();
+
+    const path = state.current;
+    if (!path || !onLibrary) return;
+
+    const note = vault.noteAt(path);
+    if (!note) {
+      await closeMissingNote();
+      return;
+    }
+
+    // 目录改名之类的事件不会直接点到这篇，所以还是回磁盘比一次内容
+    if (state.currentView !== 'note' || !isMarkdown(path)) return;
+    const disk = await vault.readNote(path, { fresh: true });
+    if (disk === lastLoaded) {
+      // 磁盘又回到和编辑器一致（比如外部撤销了修改），提示条可以收了
+      if (!fsBanner.hidden) {
+        hideFsBanner();
+        setSaveState(hasUnsavedEdit() ? 'unsaved' : 'saved');
+      }
+      return;
+    }
+
+    if (!hasUnsavedEdit()) {
+      // 干净：静默换正文，不闪白、不切视图
+      applyDiskContent(disk);
+      rebuildIndexSoon();
+    } else {
+      // 脏：绝不动编辑器里的内容，等用户决定
+      fsBanner.hidden = false;
+      setSaveState('conflict');
+    }
+  } catch (err) {
+    console.warn('[watch] 处理文件变动失败', err);
+  } finally {
+    syncLock--;
+  }
+}
+
+let lastFocusScan = 0;
+
+
 /* 内容区顶部的渐进模糊：只糊滚进固定区的内容，不糊胶囊。 */
 const docVeil = TopVeil();
 docVeil.dataset.on = '0';
@@ -1794,6 +2095,133 @@ function refreshActiveView() {
   controllers.get(state.view)?.refresh?.();
 }
 
+/* ---------------- 插件宿主 ----------------
+   插件拿不到编辑器 DOM，只能通过下面这座桥。桥故意只暴露四个动作：
+   读选区、替换选区、光标处插入、读当前笔记 —— 够写格式化/摘要类插件，
+   又不会让插件把 textarea 的引用存下来乱改。 */
+
+const editorBridge = {
+  getSelection() {
+    return {
+      text: editor.value.slice(editor.selectionStart, editor.selectionEnd),
+      start: editor.selectionStart,
+      end: editor.selectionEnd,
+    };
+  },
+
+  replaceSelection(text) {
+    editor.focus();
+    editor.setRangeText(String(text ?? ''), editor.selectionStart, editor.selectionEnd, 'end');
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+  },
+
+  insertAtCursor(text) {
+    insertAtCursor(String(text ?? ''));
+  },
+
+  /**
+   * 整篇替换（插件回退改写时用）。
+   * 不调 focus：聚焦会把 textarea 滚到光标处，用户看到的滚动位置就跳了。
+   * 光标放到开头，滚动位置在输入事件跑完（含重新排版）之后再补一次。
+   */
+  setContent(text) {
+    const next = String(text ?? '');
+    const outer = editorScroll.scrollTop;
+    const inner = editor.scrollTop;
+
+    editor.value = next;
+    editor.setSelectionRange(0, 0);
+    // 派发 input 才会触发自动保存、预览重排与统计刷新；必须冒泡
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+
+    editor.scrollTop = inner;
+    editorScroll.scrollTop = outer;
+    requestAnimationFrame(() => {
+      editor.scrollTop = inner;
+      editorScroll.scrollTop = outer;
+    });
+  },
+
+  currentNote() {
+    const note = currentNote();
+    if (!note) return null;
+    return {
+      path: note.path,
+      title: note.title || note.name || basename(note.path),
+      content: editor.value,
+    };
+  },
+
+  onSelectionChange(fn) {
+    const handler = () => {
+      try {
+        fn(editorBridge.getSelection());
+      } catch (err) {
+        console.warn('[plugins] onSelectionChange 回调抛错', err);
+      }
+    };
+    const names = ['select', 'keyup', 'mouseup', 'focus'];
+    for (const name of names) editor.addEventListener(name, handler);
+    return () => {
+      for (const name of names) editor.removeEventListener(name, handler);
+    };
+  },
+};
+
+const pluginHost = new PluginHost({ vault, editor: editorBridge });
+
+/** 注册一个右侧栏视图（旧的 globalThis.inkdown 接口与插件注册表共用这一条路径） */
+function addSidebarView(view) {
+  const off = registerSidebarView(view);
+  const node = h('div', { class: 'ink-view' });
+  viewHosts.set(view.id, node);
+  sidebar.addView({ id: view.id, label: view.label, icon: view.icon, node });
+  controllers.set(view.id, view.mount(node, sidebarCtx) || {});
+
+  return () => {
+    off();
+    controllers.get(view.id)?.destroy?.();
+    controllers.delete(view.id);
+    viewHosts.delete(view.id);
+    sidebar.removeView(view.id);
+  };
+}
+
+/**
+ * 展开右侧栏并切到某个视图。插件通过 ctx.ui.openSidebar(id) 走到这里：
+ * 「AI」导航项不该把用户踢到整页，只需要把右栏拉开、切到对话。
+ */
+function showSidebarView(id) {
+  if (!viewHosts.has(id)) return false;
+  state.view = id;
+  vault.patchWorkspace({ view: id });
+  setSidebar(true, { autoMode: true });
+  sidebar.setTab(id);
+  return true;
+}
+
+// 注册表不认识 app.js：把这几个动作交出去，插件注册时才知道该通知谁
+connectPlugins({
+  refreshNav: () => refreshNav(),
+  addSidebarView: (view) => addSidebarView(view),
+  openSidebar: (id) => showSidebarView(id),
+  openPage: (tab) => openPluginPage(tab),
+  // 插件被停用时，如果正停着它自己的页面，得先退出来
+  closePage: (id) => closePluginPage(id),
+});
+
+/** 插件页被撤销时的收尾：无论是否正停在这一页，都要清掉视图缓存 */
+function closePluginPage(id) {
+  // 插件停用后它挂过的 DOM、控制器、blob 都作废了；缓存留着的话，
+  // 重新启用会 re-mount 不了（pageMounted 还记着），只能看到一具旧躯壳
+  viewHost.destroyView(id);
+  if (state.currentView !== 'plugin' || state.pluginPage !== id) return;
+  state.pluginPage = '';
+  state.pluginLabel = '';
+  state.currentView = 'plugins';
+  openPluginsTab();
+}
+
 let autoModeBackup = null;
 
 function toggleSidebar(force) {
@@ -1826,8 +2254,8 @@ function setSidebar(open, { persist = true, autoMode = true } = {}) {
   const label = open ? '收起右侧栏' : '展开右侧栏';
   inspectorBtn.title = label;
   inspectorBtn.setAttribute('aria-label', label);
+  // 两态交给控件库：.c-iconbtn[aria-pressed="true"] 就是强调色
   inspectorBtn.setAttribute('aria-pressed', String(open));
-  inspectorBtn.classList.toggle('is-on', open);
 
   if (persist) vault.patchWorkspace({ sidebar: open });
 }
@@ -1836,7 +2264,14 @@ function setSidebar(open, { persist = true, autoMode = true } = {}) {
 
 function setSaveState(kind) {
   saveState.dataset.state = kind;
-  saveState.textContent = kind === 'editing' ? '正在保存…' : '已保存';
+  saveState.textContent =
+    kind === 'editing'
+      ? '正在保存…'
+      : kind === 'conflict'
+        ? '磁盘已变化'
+        : kind === 'unsaved'
+          ? '有未保存修改'
+          : '已保存';
 }
 
 async function renderPreview(note) {
@@ -1938,7 +2373,6 @@ function updateStats(content) {
 }
 
 function updateStar(note) {
-  starBtn.classList.toggle('is-on', note.favorite);
   starBtn.setAttribute('aria-pressed', String(note.favorite));
   const label = note.favorite ? '取消收藏' : '收藏';
   starBtn.title = label;
@@ -1959,6 +2393,29 @@ function updateTopbar() {
       topbarBreadcrumb,
       h('span', { class: 'c-topbar__crumb-icon' }, iconEl('sliders', 13)),
       h('span', { class: 'c-topbar__crumb-part c-topbar__crumb-title' }, '偏好设置')
+    );
+    return;
+  }
+
+  if (state.currentView === 'plugins') {
+    document.title = '插件 · Inkdown';
+    fill(
+      topbarBreadcrumb,
+      h('span', { class: 'c-topbar__crumb-icon' }, iconEl('puzzle', 13)),
+      h('span', { class: 'c-topbar__crumb-part c-topbar__crumb-title' }, '插件')
+    );
+    return;
+  }
+
+  if (state.currentView === 'plugin') {
+    const label = state.pluginLabel || '插件页面';
+    document.title = `${label} · Inkdown`;
+    fill(
+      topbarBreadcrumb,
+      h('span', { class: 'c-topbar__crumb-icon' }, iconEl('puzzle', 13)),
+      h('span', { class: 'c-topbar__crumb-part' }, '插件'),
+      h('span', { class: 'c-topbar__crumb-sep' }, '/'),
+      h('span', { class: 'c-topbar__crumb-part c-topbar__crumb-title' }, label)
     );
     return;
   }
@@ -2020,6 +2477,9 @@ function showEmpty({ icon: ic = 'square-dashed', title, desc, action = null }) {
 
 async function renderDoc() {
   const token = ++loadToken;
+
+  // 换文档 / 重新渲染时，上一条「磁盘已变化」的提示就失效了
+  hideFsBanner();
 
   // 非 Markdown 视图不介入文档渲染
   if (state.currentView !== 'note') return;
@@ -2121,7 +2581,7 @@ async function renderAll() {
 async function openNote(path, shouldPushTab = true, isHistoryNav = false) {
   if (state.page === 'trash') return;
   await titleTask;
-  await commitDoc();
+  await commitDoc({ force: true });
 
   if (!isHistoryNav && path) {
     if (state.navHistory[state.navIndex] !== path) {
@@ -2182,6 +2642,12 @@ async function openNote(path, shouldPushTab = true, isHistoryNav = false) {
 
   await renderAll();
   scrollTreeTo(path);
+
+  emitPluginEvent('note:open', {
+    path,
+    title: node.title || node.name,
+    isMarkdown: isMd,
+  });
 }
 
 async function renderDocForPath(path) {
@@ -2191,15 +2657,16 @@ async function renderDocForPath(path) {
 
 async function openTrash(path) {
   await titleTask;
-  await commitDoc();
+  await commitDoc({ force: true });
   state.current = path;
   await renderAll();
 }
 
 async function go(page) {
-  if (state.page === page) return;
+  // 同页但当前停的是设置 / 插件页时必须继续走：否则导航栏看着切了，文档区还留着旧页面
+  if (state.page === page && state.currentView === 'note') return;
   await titleTask;
-  await commitDoc();
+  await commitDoc({ force: true });
 
   state.page = page;
   state.query = '';
@@ -2230,7 +2697,7 @@ function targetDir() {
 
 async function newNote(dir = targetDir()) {
   await titleTask;
-  await commitDoc();
+  await commitDoc({ force: true });
   const path = await vault.createNote(dir);
 
   state.page = 'files';
@@ -2367,10 +2834,17 @@ function startRenameFolder(path, rowEl) {
 
 /* ---------------- 保存 ---------------- */
 
-async function commitDoc() {
+async function commitDoc({ force = false } = {}) {
   await titleTask;
   const note = currentNote();
   if (!note) return;
+
+  // 磁盘被外部改过、编辑器里也有内容：先别写，等用户选「重新载入」还是「保留」。
+  // 否则 500ms 自动保存会在用户看到提示条之前就把磁盘版本盖掉。
+  if (!force && !fsBanner.hidden) {
+    setSaveState('conflict');
+    return;
+  }
 
   const text = editor.value;
   if (text === lastLoaded) {
@@ -2382,9 +2856,18 @@ async function commitDoc() {
   const mtime = await vault.saveNote(note.path, text);
   lastLoaded = text;
   setSaveState('saved');
+  // 保存已经用编辑器内容覆盖了磁盘，之前那条「磁盘已变化」不再成立
+  hideFsBanner();
   updateMeta({ ...note, mtime });
   // 正文变了 → 反链/标签可能变了，索引跟着更新
   rebuildIndexSoon();
+
+  emitPluginEvent('note:save', {
+    path: note.path,
+    title: note.title || note.name,
+    content: text,
+    mtime,
+  });
 }
 
 const commitSoon = debounce(commitDoc, 500);
@@ -2952,7 +3435,7 @@ async function toggleFavorite(note) {
 
 async function trashNote(path) {
   await titleTask;
-  await commitDoc();
+  await commitDoc({ force: true });
 
   const target = vault.noteAt(path) ? path : currentNote()?.path;
   if (!target) return;
@@ -3373,6 +3856,13 @@ document.addEventListener('keydown', (e) => {
   const mod = e.metaKey || e.ctrlKey;
   const key = e.key.toLowerCase();
 
+  // 手动重扫仓库（和列表头部的刷新按钮同一入口）
+  if (mod && e.altKey && key === 'r') {
+    e.preventDefault();
+    rescanVault({ announce: true });
+    return;
+  }
+
   if (mod && (key === 'p' || key === 'o')) {
     e.preventDefault();
     openQuickSwitcher();
@@ -3430,7 +3920,8 @@ document.addEventListener('keydown', (e) => {
 
   if (mod && key === 's') {
     e.preventDefault();
-    commitDoc().then(() => toast('已保存', { icon: 'check' }));
+    // 显式保存 = 以编辑器为准，直接覆盖磁盘上的版本
+    commitDoc({ force: true }).then(() => toast('已保存', { icon: 'check' }));
     return;
   }
 
@@ -3479,18 +3970,7 @@ globalThis.inkdown = {
 
   /** 插件挂一个右侧栏视图：{ id, label, mount(host, ctx) } */
   registerSidebarView(view) {
-    const off = registerSidebarView(view);
-    const node = h('div', { class: 'ink-view' });
-    viewHosts.set(view.id, node);
-    sidebar.addView({ id: view.id, label: view.label, node });
-    controllers.set(view.id, view.mount(node, sidebarCtx) || {});
-    return () => {
-      off();
-      controllers.get(view.id)?.destroy?.();
-      controllers.delete(view.id);
-      viewHosts.delete(view.id);
-      sidebar.removeView(view.id);
-    };
+    return addSidebarView(view);
   },
 
   get vault() {
@@ -3528,6 +4008,33 @@ requestAnimationFrame(() => requestAnimationFrame(() => splitEl.classList.remove
 // 首屏画完再建索引：不挡住第一次绘制，建好后关联视图自己会刷新
 setTimeout(() => rebuildLinkIndex(), 0);
 
+/* ---------------- 文件监听 ---------------- */
+
+// 窗口重新拿回焦点时兜底扫一次：监听漏事件（网络盘、休眠唤醒）时还能补上。
+// 只刷列表不动正文；正在列表里就地改名时跳过，别把输入框重建掉。
+window.addEventListener('focus', () => {
+  if (!document.hasFocus()) return;
+  if (listScroll.contains(document.activeElement)) return;
+  const now = Date.now();
+  if (now - lastFocusScan < 800) return; // 拖动窗口会连着触发
+  lastFocusScan = now;
+  rescanVault({ announce: false });
+});
+
+connectVaultWatch({ vault, isDesktop, onChange: handleFsChange });
+
+// 只在 ?debug=1 时挂测试钩子：CDP 里可以直接模拟一批磁盘事件
+if (new URLSearchParams(location.search).get('debug') === '1') {
+  globalThis.__inkFsChange = handleFsChange;
+  globalThis.__inkVault = vault; // 让测试能绕过应用直接改「磁盘」
+}
+
+// 插件同样放到首屏之后：读目录、恢复启用状态都不该拖慢第一次绘制。
+// 单个插件激活失败只会在插件页标红，不会冒泡到这里。
+setTimeout(() => {
+  pluginHost.init().catch((err) => console.warn('[plugins] 初始化失败', err));
+}, 0);
+
 syncThemeBtn();
 
 if (vault.workspace.navHidden) {
@@ -3535,6 +4042,7 @@ if (vault.workspace.navHidden) {
   const label = '展开导航栏';
   navToggle.setAttribute('aria-label', label);
   navToggle.title = label;
+  navToggle.setAttribute('aria-pressed', 'false');
 }
 
 const initialBackdrop = vault.settings.appearance?.backdrop || 'system';
@@ -3837,7 +4345,9 @@ window.addEventListener('contextmenu', (e) => {
    窗口关闭防丢保护 & 最大化状态同步
    ========================================================================== */
 window.addEventListener('beforeunload', () => {
-  commitDoc();
+  // 关窗前以编辑器内容为准：宁可覆盖磁盘，也不能把没落盘的内容丢掉
+  commitDoc({ force: true });
+  pluginHost.flushAll();
   vault.writeJson('.inkdown/workspace.json', vault.workspace);
 });
 
