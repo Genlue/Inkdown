@@ -1,0 +1,12 @@
+pub mod dialogs;
+pub mod editor_workspace;
+pub mod file_pane;
+pub mod file_views;
+pub mod icons;
+pub mod inspector_pane;
+pub mod nav_sidebar;
+pub mod quick_switcher;
+pub mod settings_page;
+pub mod status_bar;
+pub mod tabs_bar;
+pub mod toolbar;

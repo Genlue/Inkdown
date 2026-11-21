@@ -1,10 +1,10 @@
 [package]
 name = "inkdown"
-version = "0.1.0"
+version = "1.0.0"
 description = "Inkdown · 本地优先的 Markdown 笔记应用"
 authors = ["Inkdown"]
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 [lib]
 name = "inkdown_lib"
@@ -19,15 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rfd = "0.15"
 opener = "0.7"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-futures-util = "0.3"
+glass-design-host = { git = "https://github.com/Genlue/GlassDesign", tag = "v0.9.0" }
 # 文件监听：Windows 后端是内置的（ReadDirectoryChangesW），不需要额外 feature；
 # macOS 的 FSEvents 是可选后端，必须显式打开，否则 mac 上会退化到轮询。
 notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
-
-[profile.release]
-panic = "abort"
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true

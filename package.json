@@ -1,11 +1,12 @@
 {
   "name": "inkdown",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "Inkdown · 本地优先的 Markdown 笔记应用",
   "scripts": {
-    "dev": "python -m http.server 8899 --directory web",
+    "build:ui": "node tools/build-ui.mjs",
+    "dev": "node tools/dev.mjs",
     "check": "node tools/check.mjs",
     "tauri": "tauri"
   },

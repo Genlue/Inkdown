@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="./assets/inkdown.png" />
+  <title>Inkdown</title>
+  <style>
+    /* 页面高度链归页面自己，防止滚动掉到 window 上 */
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body { background: transparent; }
+  </style>
+  <link rel="stylesheet" href="./inkdown-app.css" />
+</head>
+<body>
+  <!-- 玻璃折射底层：使用 GlassDesign 内置的合成渐变壁纸 -->
+  <div id="wallpaper" data-source="demo"></div>
+  <div id="app"></div>
+
+  <script type="module">
+    import init from './pkg/inkdown_ui.js';
+    await init();
+  </script>
+
+  <!-- 宿主壳层与壁纸接线：Tauri 宿主里自动写 data-shell="host" -->
+  <script src="wallpaper.js"></script>
+</body>
+</html>

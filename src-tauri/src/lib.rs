@@ -1,12 +1,10 @@
-use futures_util::{FutureExt, StreamExt};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
@@ -387,7 +385,6 @@ fn to_base64(data: &[u8]) -> String {
     out
 }
 
-
 /// 安全原子写入：写入临时文件 -> sync_all 强制刷盘 -> 原子替换，防止系统断电/崩溃损坏原始文件
 fn atomic_write_bytes(target: &Path, data: &[u8]) -> Result<(), String> {
     if let Some(parent) = target.parent() {
@@ -432,9 +429,13 @@ fn from_base64(s: &str) -> Result<Vec<u8>, String> {
     let mut buf = 0u32;
     let mut bits = 0u32;
     for &b in raw.as_bytes() {
-        if b == b'=' || b.is_ascii_whitespace() { continue; }
+        if b == b'=' || b.is_ascii_whitespace() {
+            continue;
+        }
         let val = table[b as usize];
-        if val == 255 { return Err("Invalid base64 character".into()); }
+        if val == 255 {
+            return Err("Invalid base64 character".into());
+        }
         buf = (buf << 6) | (val as u32);
         bits += 6;
         if bits >= 8 {
@@ -525,11 +526,10 @@ fn vault_exists(rel: String, state: State<'_, VaultRoot>) -> Result<bool, String
     Ok(resolve(&root, &rel)?.exists())
 }
 
-/* ---------------- 系统与字体 ---------------- */
+/* ---------------- 系统与窗口 ---------------- */
 
 #[tauri::command]
 fn system_fonts() -> Vec<String> {
-    use std::collections::BTreeSet;
     let mut families = BTreeSet::new();
 
     #[cfg(target_os = "windows")]
@@ -541,20 +541,41 @@ fn system_fonts() -> Vec<String> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             for line in stdout.lines() {
                 let line = line.trim();
-                if !line.contains("REG_SZ") { continue; }
+                if !line.contains("REG_SZ") {
+                    continue;
+                }
                 let parts: Vec<&str> = line.split("REG_SZ").collect();
-                if parts.is_empty() { continue; }
+                if parts.is_empty() {
+                    continue;
+                }
                 let mut name = parts[0].trim();
                 if let Some(idx) = name.rfind('(') {
                     let suffix = &name[idx..];
-                    if suffix.contains("TrueType") || suffix.contains("OpenType") || suffix.contains("PostScript") {
+                    if suffix.contains("TrueType")
+                        || suffix.contains("OpenType")
+                        || suffix.contains("PostScript")
+                    {
                         name = name[..idx].trim();
                     }
                 }
                 let styles = [
-                    " Regular", " Bold", " Italic", " Light", " Semibold", " Semi-Bold",
-                    " Black", " Medium", " Thin", " ExtraLight", " ExtraBold", " Heavy",
-                    " Oblique", " Condensed", " SemiCondensed", " DemiBold", " Demibold"
+                    " Regular",
+                    " Bold",
+                    " Italic",
+                    " Light",
+                    " Semibold",
+                    " Semi-Bold",
+                    " Black",
+                    " Medium",
+                    " Thin",
+                    " ExtraLight",
+                    " ExtraBold",
+                    " Heavy",
+                    " Oblique",
+                    " Condensed",
+                    " SemiCondensed",
+                    " DemiBold",
+                    " Demibold",
                 ];
                 let mut cleaned = name.to_string();
                 let mut changed = true;
@@ -584,7 +605,15 @@ fn system_fonts() -> Vec<String> {
     }
 
     if families.is_empty() {
-        for f in ["Microsoft YaHei", "Segoe UI", "PingFang SC", "Cascadia Code", "Consolas", "Arial", "SimSun"] {
+        for f in [
+            "Microsoft YaHei",
+            "Segoe UI",
+            "PingFang SC",
+            "Cascadia Code",
+            "Consolas",
+            "Arial",
+            "SimSun",
+        ] {
             families.insert(f.to_string());
         }
     }
@@ -623,20 +652,7 @@ fn open_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn window_set_titlebar(window: WebviewWindow, mode: String) -> Result<(), String> {
-    window
-        .set_decorations(mode == "native")
-        .map_err(|e| e.to_string())
-}
-
-/// 窗口主题。DWM 的 Acrylic/Mica 染色跟着窗口主题走，不跟 CSS 走 ——
-/// 不设这一条，深色界面下系统材质仍然是浅色，导航栏会白得像一块纸。
-#[tauri::command]
 fn window_set_theme(window: WebviewWindow, theme: String) -> Result<(), String> {
-    // "system" 必须交还 None。留着上一次的 Light/Dark 会把 WebView2 的
-    // prefers-color-scheme 一起钉死 —— 「自动」于是永远停在手动选过的那一档，
-    // 系统明明是深色也换不过来。窗口主题同时也是 DWM Acrylic 的染色依据，
-    // 所以它必须和 CSS 主题表达同一件事：跟随系统，或者明确的一档。
     match theme.as_str() {
         "dark" => window.set_theme(Some(tauri::Theme::Dark)),
         "light" => window.set_theme(Some(tauri::Theme::Light)),
@@ -645,9 +661,6 @@ fn window_set_theme(window: WebviewWindow, theme: String) -> Result<(), String> 
     .map_err(|e| e.to_string())
 }
 
-/// 当前窗口主题。窗口主题交还系统（set_theme(None)）之后，这里返回的就是
-/// OS 的真实偏好 —— 前端用它来决定「自动」到底该是明还是暗。
-/// 读不到时返回 None，由前端退回 prefers-color-scheme。
 #[tauri::command]
 fn window_get_theme(window: WebviewWindow) -> Option<String> {
     window.theme().ok().map(|t| match t {
@@ -656,323 +669,31 @@ fn window_get_theme(window: WebviewWindow) -> Option<String> {
     })
 }
 
-/// 真实系统材质入口（Windows DWM Acrylic / Mica / Blur）
 #[tauri::command]
-fn window_set_effect(
-    window: WebviewWindow,
-    enabled: bool,
-    effect_type: Option<String>,
-) -> Result<(), String> {
-    use tauri::window::{EffectsBuilder, Effect};
-    if enabled {
-        let eff = match effect_type.as_deref() {
-            Some("mica") => Effect::Mica,
-            Some("blur") => Effect::Blur,
-            _ => Effect::Acrylic,
-        };
-        let effects = EffectsBuilder::new().effect(eff).build();
-        window.set_effects(Some(effects)).map_err(|e| e.to_string())
+fn window_minimize(window: WebviewWindow) -> Result<(), String> {
+    window.minimize().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn window_toggle_maximize(window: WebviewWindow) -> Result<bool, String> {
+    let maximized = window.is_maximized().map_err(|e| e.to_string())?;
+    if maximized {
+        window.unmaximize().map_err(|e| e.to_string())?;
+        Ok(false)
     } else {
-        window.set_effects(None).map_err(|e| e.to_string())
+        window.maximize().map_err(|e| e.to_string())?;
+        Ok(true)
     }
-}
-
-/* ---------------- AI 流式代理 ---------------- */
-
-/// 正在跑的 AI 流。id 由前端生成，取消位跟着任务走：
-/// ai_cancel 只负责把某一路标记停掉，真正的收尾（发 done、清表）在任务里做。
-#[derive(Default)]
-struct AiRuns(Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>);
-
-/// 统一往窗口发 AI 事件。窗口已经关掉时 emit 会失败 —— 这不是错误，
-/// 任务仍然要把取消位和任务表清干净。
-fn ai_emit(window: &WebviewWindow, event: &str, id: &str, text: Option<&str>, message: Option<&str>) {
-    let mut payload = serde_json::Map::new();
-    payload.insert("id".to_string(), serde_json::Value::String(id.to_string()));
-    if let Some(t) = text {
-        payload.insert("text".to_string(), serde_json::Value::String(t.to_string()));
-    }
-    if let Some(m) = message {
-        payload.insert(
-            "message".to_string(),
-            serde_json::Value::String(m.to_string()),
-        );
-    }
-    let _ = window.emit(event, serde_json::Value::Object(payload));
-}
-
-/// content 可能是字符串，也可能是 [{type:"text", text:"..."}] 数组。
-fn text_of(value: &serde_json::Value) -> Option<String> {
-    if let Some(s) = value.as_str() {
-        return Some(s.to_string());
-    }
-    if let Some(items) = value.as_array() {
-        let mut out = String::new();
-        for item in items {
-            if let Some(s) = item.get("text").and_then(|x| x.as_str()) {
-                out.push_str(s);
-            } else if let Some(s) = item.as_str() {
-                out.push_str(s);
-            }
-        }
-        if !out.is_empty() {
-            return Some(out);
-        }
-    }
-    None
-}
-
-/// 流式分块长这样：choices[0].delta.content。
-/// 非流式（或部分兼容实现）会一次性给 choices[0].message.content，这里一起认。
-fn content_of(value: &serde_json::Value) -> Option<String> {
-    if let Some(text) = value.get("content").and_then(text_of) {
-        return Some(text);
-    }
-
-    let first = value.get("choices")?.as_array()?.first()?;
-
-    if let Some(text) = first
-        .get("delta")
-        .and_then(|d| d.get("content"))
-        .and_then(text_of)
-    {
-        return Some(text);
-    }
-    if let Some(text) = first
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(text_of)
-    {
-        return Some(text);
-    }
-    first.get("text").and_then(text_of)
-}
-
-/// 解析一条 `data:` 负载。返回 Some(true) 表示收到 [DONE]。
-fn consume_sse(window: &WebviewWindow, id: &str, payload: &str, emitted: &mut bool) -> Option<bool> {
-    let payload = payload.trim();
-    if payload.is_empty() {
-        return None;
-    }
-    if payload == "[DONE]" {
-        return Some(true);
-    }
-
-    let value = match serde_json::from_str::<serde_json::Value>(payload) {
-        Ok(v) => v,
-        Err(_) => return None,
-    };
-
-    if let Some(text) = content_of(&value) {
-        if !text.is_empty() {
-            *emitted = true;
-            ai_emit(window, "ai://delta", id, Some(&text), None);
-        }
-    }
-    None
-}
-
-async fn ai_stream_task(
-    window: WebviewWindow,
-    id: String,
-    url: String,
-    headers: HashMap<String, String>,
-    body: String,
-    cancel: Arc<AtomicBool>,
-) -> Result<(), String> {
-    let mut req = reqwest::Client::new().post(&url);
-    for (key, value) in headers {
-        let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
-            .map_err(|_| format!("非法请求头名称：{key}"))?;
-        let value = reqwest::header::HeaderValue::from_str(&value)
-            .map_err(|_| format!("非法请求头内容：{key}"))?;
-        req = req.header(name, value);
-    }
-
-    let resp = req
-        .body(body)
-        .send()
-        .await
-        .map_err(|err| format!("请求失败：{err}"))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        // 上游的错误体经常就是唯一有用的诊断信息（401 的 key 问题、404 的路径问题）
-        let raw = resp.bytes().await.unwrap_or_default();
-        let text = String::from_utf8_lossy(&raw);
-        let head: String = text.chars().take(200).collect();
-        return Err(format!("HTTP {}：{head}", status.as_u16()));
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut pending: Vec<u8> = Vec::new();
-    let mut full: Vec<u8> = Vec::new();
-    let mut saw_sse = false;
-    let mut emitted = false;
-
-    loop {
-        // 每个 chunk 之前检查一次：取消后不再往下游写，直接收尾
-        if cancel.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        let Some(item) = stream.next().await else {
-            break;
-        };
-        let chunk = item.map_err(|err| format!("读取流失败：{err}"))?;
-        full.extend_from_slice(&chunk);
-        pending.extend_from_slice(&chunk);
-
-        while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
-            let mut line: Vec<u8> = pending.drain(..=pos).collect();
-            line.pop(); // \n
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-
-            let line = String::from_utf8_lossy(&line);
-            let Some(payload) = line.trim().strip_prefix("data:") else {
-                continue;
-            };
-            saw_sse = true;
-            if consume_sse(&window, &id, payload, &mut emitted) == Some(true) {
-                return Ok(());
-            }
-        }
-    }
-
-    // 最后一行可能没有换行符
-    if !pending.is_empty() {
-        let tail = String::from_utf8_lossy(&pending);
-        if let Some(payload) = tail.trim().strip_prefix("data:") {
-            saw_sse = true;
-            if consume_sse(&window, &id, payload, &mut emitted) == Some(true) {
-                return Ok(());
-            }
-        }
-    }
-
-    // 非 SSE 的兼容实现：整包 JSON 里取一次 message.content
-    if !saw_sse || !emitted {
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&full) {
-            if let Some(text) = content_of(&value) {
-                if !text.is_empty() {
-                    ai_emit(&window, "ai://delta", &id, Some(&text), None);
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[tauri::command]
-async fn ai_stream(
-    window: WebviewWindow,
-    state: State<'_, AiRuns>,
-    id: String,
-    url: String,
-    headers: HashMap<String, String>,
-    body: String,
-) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err("只支持 http / https 地址".into());
-    }
-    if id.trim().is_empty() {
-        return Err("缺少请求 id".into());
-    }
-
-    let cancel = Arc::new(AtomicBool::new(false));
-    let runs = state.0.clone();
-    {
-        let mut map = runs.lock().map_err(|_| "AI 任务表损坏".to_string())?;
-        // 同一 id 重复发起时先停掉上一路，避免两条流往同一个 id 里写
-        if let Some(prev) = map.insert(id.clone(), Arc::clone(&cancel)) {
-            prev.store(true, Ordering::Relaxed);
-        }
-    }
-
-    tauri::async_runtime::spawn(async move {
-        // release 是 panic=abort，catch_unwind 在那里只是语义占位；
-        // debug/dev 下它保证任务内 panic 不会把整条 webview 拖垮。
-        let outcome = std::panic::AssertUnwindSafe(ai_stream_task(
-            window.clone(),
-            id.clone(),
-            url,
-            headers,
-            body,
-            Arc::clone(&cancel),
-        ))
-        .catch_unwind()
-        .await;
-
-        match outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(message)) => ai_emit(&window, "ai://error", &id, None, Some(&message)),
-            Err(_) => ai_emit(&window, "ai://error", &id, None, Some("AI 流任务异常退出")),
-        }
-
-        if let Ok(mut map) = runs.lock() {
-            let same = map
-                .get(&id)
-                .map(|current| Arc::ptr_eq(current, &cancel))
-                .unwrap_or(false);
-            if same {
-                map.remove(&id);
-            }
-        }
-        ai_emit(&window, "ai://done", &id, None, None);
-    });
-
-    Ok(())
+fn window_is_maximized(window: WebviewWindow) -> bool {
+    window.is_maximized().unwrap_or(false)
 }
 
 #[tauri::command]
-fn ai_cancel(window: WebviewWindow, state: State<'_, AiRuns>, id: String) {
-    if let Ok(mut map) = state.0.lock() {
-        if let Some(flag) = map.remove(&id) {
-            flag.store(true, Ordering::Relaxed);
-            // 任务自己会在下一个 chunk 前收尾；这里先补一条 done，
-            // 上游卡住、迟迟不给下一块时前端也能立刻结束等待。
-            ai_emit(&window, "ai://done", &id, None, None);
-        }
-    }
-}
-
-#[cfg(test)]
-mod ai_tests {
-    use super::*;
-
-    #[test]
-    fn reads_delta_content() {
-        let value = serde_json::json!({ "choices": [{ "delta": { "content": "你" } }] });
-        assert_eq!(content_of(&value).as_deref(), Some("你"));
-    }
-
-    #[test]
-    fn reads_message_content_once() {
-        let value = serde_json::json!({ "choices": [{ "message": { "content": "好" } }] });
-        assert_eq!(content_of(&value).as_deref(), Some("好"));
-    }
-
-    #[test]
-    fn joins_content_parts() {
-        let value = serde_json::json!({
-            "choices": [{
-                "message": { "content": [
-                    { "type": "text", "text": "a" },
-                    { "type": "text", "text": "b" }
-                ] }
-            }]
-        });
-        assert_eq!(content_of(&value).as_deref(), Some("ab"));
-    }
-
-    #[test]
-    fn ignores_empty_delta() {
-        let value = serde_json::json!({ "choices": [{ "delta": { "role": "assistant" } }] });
-        assert_eq!(content_of(&value), None);
-    }
+fn window_close(window: WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -987,8 +708,17 @@ mod watch_tests {
     #[test]
     fn drops_app_internal_dirs() {
         let r = root();
-        for rel in [".inkdown/workspace.json", ".trash/1-旧笔记.md", ".git/index", ".Inkdown/x.json"] {
-            assert_eq!(relative_event_path(&r, &r.join(rel)), None, "{rel} 不该被上报");
+        for rel in [
+            ".inkdown/workspace.json",
+            ".trash/1-旧笔记.md",
+            ".git/index",
+            ".Inkdown/x.json",
+        ] {
+            assert_eq!(
+                relative_event_path(&r, &r.join(rel)),
+                None,
+                "{rel} 不该被上报"
+            );
         }
         assert_eq!(
             relative_event_path(&r, &r.join("Notes/欢迎.md")),
@@ -999,8 +729,17 @@ mod watch_tests {
     #[test]
     fn drops_atomic_temp_and_noise_files() {
         let r = root();
-        for rel in ["Notes/a.tmp.4242", "Notes/a.md~", "Notes/.DS_Store", "Notes/Thumbs.db"] {
-            assert_eq!(relative_event_path(&r, &r.join(rel)), None, "{rel} 不该被上报");
+        for rel in [
+            "Notes/a.tmp.4242",
+            "Notes/a.md~",
+            "Notes/.DS_Store",
+            "Notes/Thumbs.db",
+        ] {
+            assert_eq!(
+                relative_event_path(&r, &r.join(rel)),
+                None,
+                "{rel} 不该被上报"
+            );
         }
         assert_eq!(
             relative_event_path(&r, &r.join("Notes/b.md")),
@@ -1038,8 +777,12 @@ pub fn run() {
     tauri::Builder::default()
         .manage(VaultRoot(Mutex::new(None)))
         .manage(FsWatch::new())
-        .manage(AiRuns::default())
+        .setup(|app| {
+            glass_design_host::install(app.handle())?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            glass_design_host::capture_backdrop,
             vault_pick,
             vault_boot_path,
             vault_get_root,
@@ -1059,12 +802,12 @@ pub fn run() {
             system_fonts,
             open_in_explorer,
             open_url,
-            window_set_titlebar,
             window_set_theme,
             window_get_theme,
-            window_set_effect,
-            ai_stream,
-            ai_cancel
+            window_minimize,
+            window_toggle_maximize,
+            window_is_maximized,
+            window_close,
         ])
         .run(tauri::generate_context!())
         .expect("Inkdown 启动失败");

@@ -1,6 +1,8 @@
 node_modules/
 .preview/
 dist/
+target/
+ui/dist/
 src-tauri/target/
 src-tauri/gen/
 .DS_Store
