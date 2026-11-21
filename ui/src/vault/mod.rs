@@ -25,12 +25,12 @@ use fs::{
 use links::snippet_around;
 use seed::{seed_notes, SEED_FOLDERS};
 
-const META_PATH: &str = ".inkdown/vault.json";
-const SETTINGS_PATH: &str = ".inkdown/settings.json";
-const WORKSPACE_PATH: &str = ".inkdown/workspace.json";
-const INDEX_PATH: &str = ".inkdown/index.json";
-const TRASH_PATH: &str = ".inkdown/trash.json";
-const TRASH_DIR: &str = ".trash";
+pub const META_PATH: &str = ".inkdown/vault.json";
+pub const SETTINGS_PATH: &str = ".inkdown/settings.json";
+pub const WORKSPACE_PATH: &str = ".inkdown/workspace.json";
+pub const INDEX_PATH: &str = ".inkdown/index.json";
+pub const TRASH_PATH: &str = ".inkdown/trash.json";
+pub const TRASH_DIR: &str = ".trash";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppearanceSettings {
@@ -539,14 +539,6 @@ impl Vault {
         self.fs.write(path, &json, None).await
     }
 
-    pub async fn persist_settings(&self) {
-        let _ = self.write_json(SETTINGS_PATH, &self.settings).await;
-    }
-
-    pub async fn persist_workspace(&self) {
-        let _ = self.write_json(WORKSPACE_PATH, &self.workspace).await;
-    }
-
     pub async fn refresh(&mut self) -> Result<(), String> {
         self.entries = self.fs.walk().await?;
         self.tree = self.build_tree();
@@ -682,72 +674,16 @@ impl Vault {
         }
     }
 
-    pub async fn read_note(&mut self, path: &str, fresh: bool) -> Result<String, String> {
-        if !fresh {
-            if let Some(cached) = self.cache.get(path) {
-                return Ok(cached.clone());
-            }
-        }
-        let text = self.fs.read(path).await?.unwrap_or_default();
-        self.cache.insert(path.to_string(), text.clone());
-        Ok(text)
-    }
+    /* ---------------- 内存模型（同步） ----------------
 
-    pub async fn save_note(&mut self, path: &str, text: &str) -> Result<u64, String> {
-        let mtime = now_ms();
-        self.fs.write(path, text, Some(mtime)).await?;
-        self.cache.insert(path.to_string(), text.to_string());
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.path == path) {
-            entry.mtime = mtime;
-        }
-        update_tree_mtime(&mut self.tree, path, mtime);
-        Ok(mtime)
-    }
+       仓库装进 `AppState` 的 `RefCell` 之后，I/O 一律在借用之外做：
+       只要有一个 `borrow_mut()` 跨过 `.await`，渲染随手读一下仓库就会
+       `RefCell already mutably borrowed` —— wasm 里 panic 直接 trap，
+       界面永远停在加载页。所以这一层只碰内存，磁盘由调用方拿着
+       `VaultFs` 句柄、在借用已经结束之后读写。
+    */
 
-    pub async fn save_attachment(&mut self, filename: &str, base64_data: &str) -> Result<String, String> {
-        let attach_dir = "attachments";
-        self.fs.mkdir(attach_dir).await?;
-        let clean = sanitize_name(filename);
-        let name = if clean.is_empty() {
-            format!("attachment_{}.png", now_ms())
-        } else {
-            clean
-        };
-        let rel = join_path(attach_dir, &name);
-        self.fs.write_binary(&rel, base64_data).await?;
-        self.refresh().await?;
-        Ok(rel)
-    }
-
-    pub async fn search(&mut self, query: &str, limit: usize) -> Vec<SearchHit> {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return Vec::new();
-        }
-        let notes = self.flat_notes();
-        let mut hits = Vec::new();
-
-        for note in notes {
-            if hits.len() >= limit {
-                break;
-            }
-            let text = self.read_note(&note.path, false).await.unwrap_or_default();
-            let title_hit = note.title.to_lowercase().contains(&q);
-            let content_hit = text.to_lowercase().contains(&q);
-            if !title_hit && !content_hit {
-                continue;
-            }
-            let snippet = if content_hit {
-                snippet_around(&text, query.trim(), 48)
-            } else {
-                String::new()
-            };
-            hits.push(SearchHit { note, snippet });
-        }
-        hits.sort_by(|a, b| b.note.mtime.cmp(&a.note.mtime));
-        hits
-    }
-
+    /// 同一目录下不重名的名字（不带扩展名冲突的那部分）。
     pub fn unique_name(&self, dir: &str, base: &str, ext: &str) -> String {
         let taken: HashSet<String> = self
             .entries
@@ -765,100 +701,89 @@ impl Vault {
         name
     }
 
-    pub async fn create_note(&mut self, dir: &str, base: &str) -> Result<String, String> {
+    /// 新建笔记要落的相对路径（重名自动加序号）。只算路径，不碰磁盘。
+    pub fn plan_new_note(&self, dir: &str, base: &str) -> String {
         let clean = sanitize_name(base);
-        let stem = if clean.is_empty() { "未命名笔记" } else { &clean };
+        let stem = if clean.is_empty() {
+            "未命名笔记"
+        } else {
+            &clean
+        };
         let name = self.unique_name(dir, stem, ".md");
-        let path = join_path(dir, &format!("{name}.md"));
-
-        self.fs.write(&path, "", None).await?;
-        self.cache.insert(path.clone(), String::new());
-        self.index.notes.insert(
-            path.clone(),
-            NoteIndexEntry {
-                favorite: false,
-                created_at: now_ms(),
-            },
-        );
-        self.write_json(INDEX_PATH, &self.index).await?;
-        self.refresh().await?;
-        Ok(path)
+        join_path(dir, &format!("{name}.md"))
     }
 
-    pub async fn create_folder(&mut self, dir: &str, base: &str) -> Result<String, String> {
+    /// 新建文件夹要落的相对路径。
+    pub fn plan_new_folder(&self, dir: &str, base: &str) -> String {
         let clean = sanitize_name(base);
-        let stem = if clean.is_empty() { "新建文件夹" } else { &clean };
+        let stem = if clean.is_empty() {
+            "新建文件夹"
+        } else {
+            &clean
+        };
         let name = self.unique_name(dir, stem, "");
-        let path = join_path(dir, &name);
-        self.fs.mkdir(&path).await?;
-        self.refresh().await?;
-        Ok(path)
+        join_path(dir, &name)
     }
 
-    pub async fn rename_note(&mut self, path: &str, next_base: &str) -> Result<String, String> {
+    /// 重命名笔记的目标路径；名字没变时给 `None`，调用方直接跳过 I/O。
+    pub fn plan_rename_note(&self, path: &str, next_base: &str) -> Result<Option<String>, String> {
         let clean = sanitize_name(next_base);
         if clean.is_empty() {
             return Err("名称不能为空".into());
         }
         let dir = dirname(path);
         if clean == strip_ext(&basename(path)) {
-            return Ok(path.to_string());
+            return Ok(None);
         }
         let unique = self.unique_name(&dir, &clean, ".md");
         let next = join_path(&dir, &format!("{unique}.md"));
         if next == path {
-            return Ok(path.to_string());
+            return Ok(None);
         }
-
-        self.fs.rename(path, &next).await?;
-        if let Some(meta) = self.index.notes.remove(path) {
-            self.index.notes.insert(next.clone(), meta);
-            self.write_json(INDEX_PATH, &self.index).await?;
-        }
-        if let Some(cached) = self.cache.remove(path) {
-            self.cache.insert(next.clone(), cached);
-        }
-        self.migrate_workspace_path(path, &next);
-        self.persist_workspace().await;
-        self.refresh().await?;
-        Ok(next)
+        Ok(Some(next))
     }
 
-    pub async fn rename_folder(&mut self, path: &str, next_name: &str) -> Result<String, String> {
+    /// 重命名文件夹的目标路径；名字没变时给 `None`。
+    pub fn plan_rename_folder(
+        &self,
+        path: &str,
+        next_name: &str,
+    ) -> Result<Option<String>, String> {
         let clean = sanitize_name(next_name);
         if clean.is_empty() {
             return Err("名称不能为空".into());
         }
         if clean == basename(path) {
-            return Ok(path.to_string());
+            return Ok(None);
         }
         let parent = dirname(path);
         let unique = self.unique_name(&parent, &clean, "");
         let next = join_path(&parent, &unique);
-        self.fs.rename(path, &next).await?;
-        self.migrate_prefix(path, &next).await?;
-        self.refresh().await?;
-        Ok(next)
+        if next == path {
+            return Ok(None);
+        }
+        Ok(Some(next))
     }
 
-    pub async fn move_item(&mut self, src_path: &str, target_dir: &str) -> Result<String, String> {
-        if src_path.is_empty() {
+    /// 移动的目标路径，附带「来源是不是文件夹」；留在原地时给 `None`。
+    pub fn plan_move(&self, src: &str, target_dir: &str) -> Result<Option<(String, bool)>, String> {
+        if src.is_empty() {
             return Err("源路径为空".into());
         }
-        if target_dir == src_path || target_dir.starts_with(&format!("{src_path}/")) {
+        if target_dir == src || target_dir.starts_with(&format!("{src}/")) {
             return Err("无法将文件夹移入其自身或子文件夹中".into());
         }
-        let base = basename(src_path);
+        let base = basename(src);
         let tentative = join_path(target_dir, &base);
-        if src_path == tentative {
-            return Ok(src_path.to_string());
+        if src == tentative {
+            return Ok(None);
         }
 
-        let ext = get_file_ext(&base);
         let is_dir = self
             .entries
             .iter()
-            .any(|e| e.path == src_path && e.kind == "dir");
+            .any(|e| e.path == src && e.kind == "dir");
+        let ext = get_file_ext(&base);
         let dot_ext = if is_dir || ext.is_empty() {
             String::new()
         } else {
@@ -870,169 +795,74 @@ impl Vault {
             strip_ext(&base)
         };
         let unique = self.unique_name(target_dir, &stem, &dot_ext);
-        let next_path = join_path(target_dir, &format!("{unique}{dot_ext}"));
+        let next = join_path(target_dir, &format!("{unique}{dot_ext}"));
+        Ok(Some((next, is_dir)))
+    }
 
-        self.fs.rename(src_path, &next_path).await?;
-        if is_dir {
-            self.migrate_prefix(src_path, &next_path).await?;
-        } else {
-            if let Some(meta) = self.index.notes.remove(src_path) {
-                self.index.notes.insert(next_path.clone(), meta);
-                self.write_json(INDEX_PATH, &self.index).await?;
-            }
-            if let Some(cached) = self.cache.remove(src_path) {
-                self.cache.insert(next_path.clone(), cached);
-            }
-            self.migrate_workspace_path(src_path, &next_path);
-            self.persist_workspace().await;
+    /// 装一次 `walk` 的结果并重建树。
+    pub fn apply_entries(&mut self, entries: Vec<FsEntry>) {
+        self.entries = entries;
+        self.tree = self.build_tree();
+    }
+
+    /// 记住一篇刚读出来的笔记内容。
+    pub fn remember_note(&mut self, path: &str, text: &str) {
+        self.cache.insert(path.to_string(), text.to_string());
+    }
+
+    pub fn cached_text(&self, path: &str) -> Option<&String> {
+        self.cache.get(path)
+    }
+
+    /// 记住一次成功的写盘：缓存、条目与树上的 mtime 一起更新。
+    pub fn mark_saved(&mut self, path: &str, text: &str, mtime: u64) {
+        self.cache.insert(path.to_string(), text.to_string());
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.path == path) {
+            entry.mtime = mtime;
         }
-        self.refresh().await?;
-        Ok(next_path)
+        update_tree_mtime(&mut self.tree, path, mtime);
     }
 
-    pub async fn duplicate_note(&mut self, path: &str) -> Result<String, String> {
-        let content = self.read_note(path, false).await?;
-        let dir = dirname(path);
-        let base = format!("{} 副本", strip_ext(&basename(path)));
-        let new_path = self.create_note(&dir, &base).await?;
-        self.save_note(&new_path, &content).await?;
-        Ok(new_path)
-    }
-
-    pub async fn delete_folder(&mut self, path: &str) -> Result<(), String> {
-        self.fs.remove(path).await?;
-        let prefix = format!("{path}/");
-        self.index
-            .notes
-            .retain(|k, _| k != path && !k.starts_with(&prefix));
-        self.cache
-            .retain(|k, _| k != path && !k.starts_with(&prefix));
-        self.workspace
-            .recents
-            .retain(|p| p != path && !p.starts_with(&prefix));
-        self.workspace
-            .open_tabs
-            .retain(|p| p != path && !p.starts_with(&prefix));
-        self.write_json(INDEX_PATH, &self.index).await?;
-        self.persist_workspace().await;
-        self.refresh().await
-    }
-
-    pub async fn toggle_favorite(&mut self, path: &str) -> Result<bool, String> {
-        let entry = self
-            .index
-            .notes
-            .entry(path.to_string())
-            .or_insert_with(|| NoteIndexEntry {
+    /// 新建的笔记在索引里登记创建时间，返回要落盘的 index.json。
+    pub fn index_register(&mut self, path: &str) -> String {
+        self.index.notes.insert(
+            path.to_string(),
+            NoteIndexEntry {
                 favorite: false,
                 created_at: now_ms(),
-            });
-        entry.favorite = !entry.favorite;
-        let fav = entry.favorite;
-        self.write_json(INDEX_PATH, &self.index).await?;
-        update_tree_favorite(&mut self.tree, path, fav);
-        Ok(fav)
+            },
+        );
+        self.index_json()
     }
 
-    pub async fn trash_note(&mut self, path: &str) -> Result<String, String> {
-        let name = basename(path);
-        let trash_path = join_path(TRASH_DIR, &format!("{}-{name}", now_ms()));
-        self.fs.rename(path, &trash_path).await?;
-        self.trash.push(TrashEntry {
-            path: trash_path.clone(),
-            original_path: path.to_string(),
-            name: strip_ext(&name),
-            deleted_at: now_ms(),
-        });
-        self.write_json(TRASH_PATH, &self.trash).await?;
-        if let Some(cached) = self.cache.remove(path) {
-            self.cache.insert(trash_path.clone(), cached);
-        }
-        self.workspace.recents.retain(|p| p != path);
-        self.workspace.open_tabs.retain(|p| p != path);
-        self.persist_workspace().await;
-        self.refresh().await?;
-        Ok(trash_path)
+    pub fn index_json(&self) -> String {
+        serde_json::to_string_pretty(&self.index).unwrap_or_default()
     }
 
-    pub async fn restore_trash(&mut self, trash_path: &str) -> Result<String, String> {
-        let entry = self
-            .trash
-            .iter()
-            .find(|t| t.path == trash_path)
-            .cloned()
-            .ok_or_else(|| "回收站里找不到这篇笔记".to_string())?;
-
-        let dir = dirname(&entry.original_path);
-        if !dir.is_empty() {
-            self.fs.mkdir(&dir).await?;
-        }
-
-        let mut target = entry.original_path.clone();
-        if self.fs.exists(&target).await? {
-            let ext = get_file_ext(&target);
-            let dot_ext = if ext.is_empty() {
-                ".md".to_string()
-            } else {
-                format!(".{ext}")
-            };
-            let unique = self.unique_name(&dir, &strip_ext(&basename(&target)), &dot_ext);
-            target = join_path(&dir, &format!("{unique}{dot_ext}"));
-        }
-
-        self.fs.rename(trash_path, &target).await?;
-        self.trash.retain(|t| t.path != trash_path);
-        self.write_json(TRASH_PATH, &self.trash).await?;
-        if let Some(cached) = self.cache.remove(trash_path) {
-            self.cache.insert(target.clone(), cached);
-        }
-        self.refresh().await?;
-        Ok(target)
+    pub fn trash_json(&self) -> String {
+        serde_json::to_string_pretty(&self.trash).unwrap_or_default()
     }
 
-    pub async fn delete_forever(&mut self, trash_path: &str) -> Result<(), String> {
-        let entry = self.trash.iter().find(|t| t.path == trash_path).cloned();
-        self.fs.remove(trash_path).await?;
-        if let Some(e) = entry {
-            self.index.notes.remove(&e.original_path);
-            self.write_json(INDEX_PATH, &self.index).await?;
-        }
-        self.trash.retain(|t| t.path != trash_path);
-        self.write_json(TRASH_PATH, &self.trash).await?;
-        self.cache.remove(trash_path);
-        self.refresh().await
+    pub fn workspace_json(&self) -> String {
+        serde_json::to_string_pretty(&self.workspace).unwrap_or_default()
     }
 
-    pub async fn empty_trash(&mut self) -> Result<(), String> {
-        let items: Vec<TrashEntry> = self.trash.drain(..).collect();
-        for item in items {
-            let _ = self.fs.remove(&item.path).await;
-            self.index.notes.remove(&item.original_path);
-            self.cache.remove(&item.path);
+    /// 单篇改名：索引、缓存、工作区里的旧路径一起搬走，返回 index.json。
+    pub fn migrate_note_path(&mut self, from: &str, to: &str) -> String {
+        if let Some(meta) = self.index.notes.remove(from) {
+            self.index.notes.insert(to.to_string(), meta);
         }
-        self.write_json(INDEX_PATH, &self.index).await?;
-        self.write_json(TRASH_PATH, &self.trash).await?;
-        self.refresh().await
+        if let Some(cached) = self.cache.remove(from) {
+            self.cache.insert(to.to_string(), cached);
+        }
+        migrate_workspace_path(&mut self.workspace, from, to);
+        self.index_json()
     }
 
-    fn migrate_workspace_path(&mut self, from: &str, to: &str) {
-        if self.workspace.last_note == from {
-            self.workspace.last_note = to.to_string();
-        }
-        for item in &mut self.workspace.recents {
-            if item == from {
-                *item = to.to_string();
-            }
-        }
-        for item in &mut self.workspace.open_tabs {
-            if item == from {
-                *item = to.to_string();
-            }
-        }
-    }
-
-    async fn migrate_prefix(&mut self, from: &str, to: &str) -> Result<(), String> {
+    /// 目录改名或移动：整棵子树（索引与缓存）一起搬。
+    pub fn migrate_dir_prefix(&mut self, from: &str, to: &str) -> String {
         let prefix = format!("{from}/");
+
         let moved_notes: Vec<(String, NoteIndexEntry)> = self
             .index
             .notes
@@ -1071,9 +901,124 @@ impl Vault {
             rewrite(p);
         }
 
-        self.write_json(INDEX_PATH, &self.index).await?;
-        self.persist_workspace().await;
-        Ok(())
+        self.index_json()
+    }
+
+    /// 删掉一个文件（或整棵子树）留下的索引、缓存与工作区痕迹。
+    pub fn forget_path(&mut self, path: &str) -> String {
+        let prefix = format!("{path}/");
+        self.index
+            .notes
+            .retain(|k, _| k != path && !k.starts_with(&prefix));
+        self.cache
+            .retain(|k, _| k != path && !k.starts_with(&prefix));
+        self.workspace
+            .recents
+            .retain(|p| p != path && !p.starts_with(&prefix));
+        self.workspace
+            .open_tabs
+            .retain(|p| p != path && !p.starts_with(&prefix));
+        self.index_json()
+    }
+
+    /// 收藏开关，返回新状态。
+    pub fn flip_favorite(&mut self, path: &str) -> bool {
+        let entry = self
+            .index
+            .notes
+            .entry(path.to_string())
+            .or_insert_with(|| NoteIndexEntry {
+                favorite: false,
+                created_at: now_ms(),
+            });
+        entry.favorite = !entry.favorite;
+        let fav = entry.favorite;
+        update_tree_favorite(&mut self.tree, path, fav);
+        fav
+    }
+
+    /// 登记一条回收站记录，缓存跟着挪到回收站路径。
+    pub fn push_trash(&mut self, trash_path: &str, original_path: &str) {
+        let name = basename(original_path);
+        self.trash.push(TrashEntry {
+            path: trash_path.to_string(),
+            original_path: original_path.to_string(),
+            name: strip_ext(&name),
+            deleted_at: now_ms(),
+        });
+        if let Some(cached) = self.cache.remove(original_path) {
+            self.cache.insert(trash_path.to_string(), cached);
+        }
+        self.workspace.recents.retain(|p| p != original_path);
+        self.workspace.open_tabs.retain(|p| p != original_path);
+    }
+
+    pub fn trash_entry(&self, trash_path: &str) -> Option<TrashEntry> {
+        self.trash.iter().find(|t| t.path == trash_path).cloned()
+    }
+
+    pub fn drop_trash(&mut self, trash_path: &str) {
+        self.trash.retain(|t| t.path != trash_path);
+    }
+
+    /// 清空内存里的回收站记录，返回被清掉的条目（磁盘由调用方删）。
+    pub fn drain_trash(&mut self) -> Vec<TrashEntry> {
+        let items: Vec<TrashEntry> = self.trash.drain(..).collect();
+        for item in &items {
+            self.index.notes.remove(&item.original_path);
+            self.cache.remove(&item.path);
+        }
+        items
+    }
+
+    /// 全文搜索：只查调用方已经准备好的文本（磁盘 I/O 在借用之外完成）。
+    pub fn search(
+        &self,
+        texts: &HashMap<String, String>,
+        query: &str,
+        limit: usize,
+    ) -> Vec<SearchHit> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        for note in self.flat_notes() {
+            if hits.len() >= limit {
+                break;
+            }
+            let text = texts.get(&note.path).cloned().unwrap_or_default();
+            let title_hit = note.title.to_lowercase().contains(&q);
+            let content_hit = text.to_lowercase().contains(&q);
+            if !title_hit && !content_hit {
+                continue;
+            }
+            let snippet = if content_hit {
+                snippet_around(&text, query.trim(), 48)
+            } else {
+                String::new()
+            };
+            hits.push(SearchHit { note, snippet });
+        }
+        hits.sort_by(|a, b| b.note.mtime.cmp(&a.note.mtime));
+        hits
+    }
+}
+
+/// 工作区里记着的路径跟着改名走。
+fn migrate_workspace_path(workspace: &mut WorkspaceState, from: &str, to: &str) {
+    if workspace.last_note == from {
+        workspace.last_note = to.to_string();
+    }
+    for item in &mut workspace.recents {
+        if item == from {
+            *item = to.to_string();
+        }
+    }
+    for item in &mut workspace.open_tabs {
+        if item == from {
+            *item = to.to_string();
+        }
     }
 }
 
@@ -1123,4 +1068,64 @@ fn update_tree_favorite(nodes: &mut [VaultTreeNode], path: &str, fav: bool) {
 /// 切换本地浏览器仓库时用的 helper（保留与旧版本一致的多库切换）。
 pub fn list_local_vaults() -> Vec<VaultMeta> {
     list_vaults()
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    /// 造一个只含内存数据的仓库：不碰磁盘、不碰 JS，纯测命名与路径规则。
+    fn vault_with(entries: &[(&str, &str)]) -> Vault {
+        let mut vault = Vault::empty(
+            VaultFs::Tauri {
+                root: "root".into(),
+            },
+            VaultMeta {
+                id: "test".into(),
+                name: "test".into(),
+                version: 1,
+                created_at: 0,
+            },
+        );
+        vault.entries = entries
+            .iter()
+            .map(|(path, kind)| FsEntry {
+                path: (*path).into(),
+                kind: (*kind).into(),
+                mtime: 0,
+            })
+            .collect();
+        vault.tree = vault.build_tree();
+        vault
+    }
+
+    #[test]
+    fn new_note_avoids_name_clash() {
+        let vault = vault_with(&[("a.md", "file"), ("a 2.md", "file")]);
+        assert_eq!(vault.plan_new_note("", "a"), "a 3.md");
+        assert_eq!(vault.plan_new_note("", ""), "未命名笔记.md");
+        assert_eq!(vault.plan_new_note("Notes/abc", "x"), "Notes/abc/x.md");
+    }
+
+    #[test]
+    fn rename_keeps_extension_and_skips_noop() {
+        let vault = vault_with(&[("Notes/a.md", "file")]);
+        assert_eq!(vault.plan_rename_note("Notes/a.md", "a").unwrap(), None);
+        assert_eq!(
+            vault.plan_rename_note("Notes/a.md", "b").unwrap().as_deref(),
+            Some("Notes/b.md")
+        );
+        assert!(vault.plan_rename_note("Notes/a.md", "  ").is_err());
+    }
+
+    #[test]
+    fn move_refuses_self_and_keeps_extension() {
+        let vault = vault_with(&[("d", "dir"), ("d/a.md", "file"), ("e", "dir")]);
+        assert!(vault.plan_move("d", "d/sub").is_err());
+        assert_eq!(vault.plan_move("d", "").unwrap(), None);
+        assert_eq!(
+            vault.plan_move("d/a.md", "e").unwrap().map(|plan| plan.0),
+            Some("e/a.md".to_string())
+        );
+    }
 }

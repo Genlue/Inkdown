@@ -30,6 +30,11 @@ use vault::fs::dirname;
 
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
+    // wasm 里 panic 默认只会 trap，控制台一个字都看不到、界面停在原地。
+    // 桌面端排查「打开就卡在加载」时全靠这条日志，别删。
+    std::panic::set_hook(Box::new(|info| {
+        web_sys::console::error_1(&format!("[inkdown panic] {info}").into());
+    }));
     glass_design::install();
     leptos::mount::mount_to_body(App);
 }

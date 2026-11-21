@@ -29,7 +29,16 @@
 
 版本号写在四处，必须完全一致：`package.json`、`ui/Cargo.toml`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`。`npm run check` 会核对。
 
-### 3. 其它
+### 3. 仓库借用不能跨 `await`
+
+`AppState.vault` 是 `Rc<RefCell<Option<Vault>>>`，而渲染随时会在 `.await` 期间读它。
+只要有一个 `borrow_mut()` 活过 await 点，读仓库就是一次 `RefCell already mutably borrowed`
+panic —— wasm 里 panic 等于 trap，界面从此停在加载页、点哪都不动。
+
+异步操作一律拆三段：`vault_fs()` 拿句柄 → 借用之外做 I/O → `with_vault_mut()` 写回内存。
+`Vault` 上只保留同步的内存操作，磁盘读写由调用方用 `VaultFs` 完成。
+
+### 4. 其它
 
 - 中文注释与界面文案，注释说明**为什么**，不复述代码在干什么。
 - 改完必须跑通 `npm run check`（含 `cargo check` 与 `cargo test --lib`）以及 `npm run build:ui`。

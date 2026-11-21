@@ -1172,16 +1172,7 @@ fn read_image_and_insert(
             return;
         };
         spawn_local(async move {
-            let saved = {
-                let cell = state.vault.get_value();
-                let mut guard = cell.borrow_mut();
-                if let Some(v) = guard.as_mut() {
-                    v.save_attachment(&filename, &data_url).await
-                } else {
-                    Err("仓库未就绪".into())
-                }
-            };
-            match saved {
+            match state.save_attachment(filename, data_url).await {
                 Ok(rel) => {
                     insert_fn(format!("\n![{}]({})\n", basename(&rel), rel));
                     toast(format!("已插入图片：{}", basename(&rel)));

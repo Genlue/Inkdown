@@ -1,6 +1,6 @@
 [package]
 name = "inkdown-ui"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Inkdown UI · Leptos CSR + GlassDesign"
@@ -25,5 +25,5 @@ web-sys = { version = "0.3", features = [
   "DragEvent", "DataTransfer", "ClipboardEvent", "DataTransferItemList",
   "DataTransferItem", "File", "FileList", "FileReader", "Blob",
   "Navigator", "Clipboard", "ScrollToOptions", "ScrollBehavior",
-  "MediaQueryList", "WheelEvent", "InputEvent", "Selection",
+  "MediaQueryList", "WheelEvent", "InputEvent", "Selection", "console",
 ] }

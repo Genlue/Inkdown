@@ -1,7 +1,7 @@
 //! 应用全局响应式状态与业务动作编排。
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use glass_design::prelude::*;
@@ -15,11 +15,14 @@ use crate::tauri_bridge::{
     sync_window_theme,
 };
 use crate::vault::fs::{
-    basename, dirname, is_hidden, list_vaults, set_active_vault_id,
-    strip_ext, FileType, VaultMeta,
+    basename, dirname, get_file_ext, is_hidden, join_path, list_vaults, now_ms,
+    set_active_vault_id, strip_ext, FileType, VaultFs, VaultMeta,
 };
 use crate::vault::links::{build_index, resolve_wikilink_path, IndexInput, LinkIndex};
-use crate::vault::{NoteInfo, SearchHit, TrashEntry, Vault, VaultCounts, VaultTreeNode};
+use crate::vault::{
+    sanitize_name, NoteInfo, SearchHit, TrashEntry, Vault, VaultCounts, VaultTreeNode, INDEX_PATH,
+    TRASH_DIR, TRASH_PATH, WORKSPACE_PATH,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SaveStatus {
@@ -400,16 +403,12 @@ impl AppState {
             let mut reloaded = false;
             if let Some(ref cur) = current {
                 if active_changed {
-                    let disk_text = {
-                        let cell = self.vault.get_value();
-                        let mut guard = cell.borrow_mut();
-                        if let Some(v) = guard.as_mut() {
-                            v.read_note(cur, true).await.ok()
-                        } else {
-                            None
-                        }
+                    let disk_text = match self.vault_fs() {
+                        Some(fs) => fs.read(cur).await.ok().map(|v| v.unwrap_or_default()),
+                        None => None,
                     };
                     if let Some(text) = disk_text {
+                        self.with_vault_mut(|v| v.remember_note(cur, &text));
                         if text != self.saved_content.get_untracked() {
                             let is_dirty = self.is_dirty();
                             if is_dirty {
@@ -432,17 +431,7 @@ impl AppState {
     }
 
     pub async fn rescan_vault(self, announce: bool) {
-        let ok = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.refresh().await.is_ok()
-            } else {
-                false
-            }
-        };
-        if ok {
-            self.bump();
+        if self.rescan().await {
             self.rebuild_link_index().await;
             if announce {
                 toast("已刷新仓库文件列表");
@@ -452,25 +441,33 @@ impl AppState {
 
     pub async fn rebuild_link_index(self) {
         self.indexing.set(true);
-        let inputs: Vec<IndexInput> = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                let notes = v.flat_notes();
-                let mut list = Vec::with_capacity(notes.len());
-                for note in notes {
-                    let content = v.read_note(&note.path, false).await.unwrap_or_default();
-                    list.push(IndexInput {
-                        path: note.path,
-                        title: note.title,
-                        content,
-                    });
-                }
-                list
-            } else {
-                Vec::new()
-            }
+        let Some((fs, notes)) = self.with_vault(|v| (v.fs.clone(), v.flat_notes())) else {
+            self.indexing.set(false);
+            return;
         };
+        let mut inputs = Vec::with_capacity(notes.len());
+        for note in notes {
+            let cached = self
+                .with_vault(|v| v.cached_text(&note.path).cloned())
+                .flatten();
+            let content = match cached {
+                Some(text) => text,
+                None => {
+                    // 这里绝不能借仓库：读盘要走手上这份 fs 句柄
+                    let text = match fs.read(&note.path).await {
+                        Ok(Some(t)) => t,
+                        _ => String::new(),
+                    };
+                    self.with_vault_mut(|v| v.remember_note(&note.path, &text));
+                    text
+                }
+            };
+            inputs.push(IndexInput {
+                path: note.path,
+                title: note.title,
+                content,
+            });
+        }
         let idx = build_index(&inputs);
         self.link_index.set(idx);
         self.indexing.set(false);
@@ -600,6 +597,45 @@ impl AppState {
             && self.editor_content.get_untracked() != self.saved_content.get_untracked()
     }
 
+    /* ---------------- 仓库访问：借用绝不能跨 await ----------------
+       整个应用只有一个线程，`.await` 期间渲染随时会读仓库。
+       只要有一个 `borrow_mut()` 活过了 await 点，读仓库就是
+       `RefCell already mutably borrowed` —— wasm 里 panic 等于 trap，
+       界面从此不再响应。所以下面三个助手都只做同步的事：
+       异步 I/O 一律先 `vault_fs()` 拿句柄，借用在 await 之前就已经结束。
+    */
+
+    /// 只读一次仓库。
+    fn with_vault<R>(&self, f: impl FnOnce(&Vault) -> R) -> Option<R> {
+        self.vault.with_value(|cell| cell.borrow().as_ref().map(f))
+    }
+
+    /// 写一次仓库（同步）。
+    fn with_vault_mut<R>(&self, f: impl FnOnce(&mut Vault) -> R) -> Option<R> {
+        self.vault.with_value(|cell| {
+            let mut guard = cell.borrow_mut();
+            guard.as_mut().map(f)
+        })
+    }
+
+    /// 拿一份文件句柄；拿到之后随便 await，都不会再持有借用。
+    fn vault_fs(&self) -> Option<VaultFs> {
+        self.with_vault(|v| v.fs.clone())
+    }
+
+    /// 重新遍历仓库并刷新内存视图。
+    async fn rescan(self) -> bool {
+        let Some(fs) = self.vault_fs() else {
+            return false;
+        };
+        let Ok(entries) = fs.walk().await else {
+            return false;
+        };
+        self.with_vault_mut(|v| v.apply_entries(entries));
+        self.bump();
+        true
+    }
+
     /* ---------------- 文档打开 / 切换 / 保存 ---------------- */
 
     pub async fn commit_doc(self) {
@@ -617,17 +653,16 @@ impl AppState {
             return;
         }
         self.save_status.set(SaveStatus::Saving);
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.save_note(&path, &content).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            self.save_status.set(SaveStatus::Dirty);
+            toast("保存失败：仓库未就绪");
+            return;
         };
+        let mtime = now_ms();
+        let res = fs.write(&path, &content, Some(mtime)).await;
         match res {
-            Ok(_) => {
+            Ok(()) => {
+                self.with_vault_mut(|v| v.mark_saved(&path, &content, mtime));
                 self.saved_content.set(content);
                 self.save_status.set(SaveStatus::Saved);
                 self.mark_tab_dirty(&path, false);
@@ -734,13 +769,21 @@ impl AppState {
         }
 
         if info.is_markdown {
-            let content = {
-                let cell = self.vault.get_value();
-                let mut guard = cell.borrow_mut();
-                if let Some(v) = guard.as_mut() {
-                    v.read_note(&info.path, false).await.unwrap_or_default()
-                } else {
-                    String::new()
+            let cached = self
+                .with_vault(|v| v.cached_text(&info.path).cloned())
+                .flatten();
+            let content = match cached {
+                Some(text) => text,
+                None => {
+                    let text = match self.vault_fs() {
+                        Some(fs) => match fs.read(&info.path).await {
+                            Ok(Some(t)) => t,
+                            _ => String::new(),
+                        },
+                        None => String::new(),
+                    };
+                    self.with_vault_mut(|v| v.remember_note(&info.path, &text));
+                    text
                 }
             };
             self.editor_path.set(Some(info.path.clone()));
@@ -781,9 +824,7 @@ impl AppState {
         let expanded_vec: Vec<String> = self.expanded_dirs.get_untracked().into_iter().collect();
 
         {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
+            let ws_json = self.with_vault_mut(|v| {
                 v.workspace.last_note = info.path.clone();
                 v.workspace.open_tabs = tabs_paths;
                 v.workspace.expanded = expanded_vec;
@@ -792,12 +833,11 @@ impl AppState {
                 if v.workspace.recents.len() > 10 {
                     v.workspace.recents.truncate(10);
                 }
-                let w = v.workspace.clone();
-                let fs = v.fs.clone();
+                v.workspace_json()
+            });
+            if let (Some(fs), Some(json)) = (self.vault_fs(), ws_json) {
                 spawn_local(async move {
-                    if let Ok(json) = serde_json::to_string_pretty(&w) {
-                        let _ = fs.write(".inkdown/workspace.json", &json, None).await;
-                    }
+                    let _ = fs.write(WORKSPACE_PATH, &json, None).await;
                 });
             }
         }
@@ -921,159 +961,182 @@ impl AppState {
         }
     }
 
-    /* ---------------- 笔记 / 文件夹 CRUD ---------------- */
+    /* ---------------- 笔记 / 文件夹 CRUD ----------------
+       每个动作都拆成三段：同步读内存 → 借用外的 I/O → 同步写回内存。
+       顺序和以前保持一致，只是中间不再握着借用去 await。
+    */
 
     pub async fn create_note(self, dir: String, title: String) {
         self.commit_doc().await;
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.create_note(&dir, &title).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(path) => {
-                self.bump();
-                self.open_file(&path, true).await;
-                self.rebuild_link_index().await;
-                toast("已新建笔记");
-            }
-            Err(err) => {
-                toast(format!("新建失败：{err}"));
-            }
+        let Some(path) = self.with_vault(|v| v.plan_new_note(&dir, &title)) else {
+            return;
+        };
+        if let Err(err) = fs.write(&path, "", None).await {
+            toast(format!("新建失败：{err}"));
+            return;
         }
+        let index_json = self.with_vault_mut(|v| v.index_register(&path));
+        if let Some(json) = index_json {
+            let _ = fs.write(INDEX_PATH, &json, None).await;
+        }
+        self.rescan().await;
+        self.open_file(&path, true).await;
+        self.rebuild_link_index().await;
+        toast("已新建笔记");
     }
 
     pub async fn create_folder(self, dir: String, name: String) {
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.create_folder(&dir, &name).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(path) => {
-                self.expanded_dirs.update(|set| {
-                    if !dir.is_empty() {
-                        set.insert(dir.clone());
-                    }
-                    set.insert(path);
-                });
-                self.persist_expanded();
-                self.bump();
-                toast("已新建文件夹");
-            }
-            Err(err) => {
-                toast(format!("新建文件夹失败：{err}"));
-            }
+        let Some(path) = self.with_vault(|v| v.plan_new_folder(&dir, &name)) else {
+            return;
+        };
+        if let Err(err) = fs.mkdir(&path).await {
+            toast(format!("新建文件夹失败：{err}"));
+            return;
         }
+        self.rescan().await;
+        self.expanded_dirs.update(|set| {
+            if !dir.is_empty() {
+                set.insert(dir.clone());
+            }
+            set.insert(path);
+        });
+        self.persist_expanded();
+        toast("已新建文件夹");
     }
 
     pub async fn rename_note_to(self, path: String, next_title: String) {
         if self.editor_path.get_untracked().as_deref() == Some(&path) {
             self.commit_doc().await;
         }
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.rename_note(&path, &next_title).await
-            } else {
-                Err("仓库未就绪".into())
-            }
-        };
-        match res {
-            Ok(next_path) => {
-                let new_label = strip_ext(&basename(&next_path));
-                self.open_tabs.update(|tabs| {
-                    for t in tabs {
-                        if t.path == path {
-                            t.path = next_path.clone();
-                            t.label = new_label.clone();
-                        }
-                    }
-                });
-                if self.active_tab.get_untracked().as_deref() == Some(&path) {
-                    self.active_tab.set(Some(next_path.clone()));
-                }
-                if self.editor_path.get_untracked().as_deref() == Some(&path) {
-                    self.editor_path.set(Some(next_path.clone()));
-                    self.editor_title.set(new_label);
-                }
-                self.history.update(|h| {
-                    for p in h {
-                        if p == &path {
-                            *p = next_path.clone();
-                        }
-                    }
-                });
-                self.bump();
-                self.rebuild_link_index().await;
-            }
-            Err(err) => {
+        let next_path = match self.with_vault(|v| v.plan_rename_note(&path, &next_title)) {
+            Some(Ok(Some(next))) => next,
+            Some(Ok(None)) => return,
+            Some(Err(err)) => {
                 toast(format!("重命名失败：{err}"));
+                return;
             }
+            None => return,
+        };
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
+        };
+        if let Err(err) = fs.rename(&path, &next_path).await {
+            toast(format!("重命名失败：{err}"));
+            return;
         }
+        let index_json = self.with_vault_mut(|v| v.migrate_note_path(&path, &next_path));
+        if let Some(json) = index_json {
+            let _ = fs.write(INDEX_PATH, &json, None).await;
+        }
+        self.persist_workspace_via(&fs).await;
+
+        let new_label = strip_ext(&basename(&next_path));
+        self.open_tabs.update(|tabs| {
+            for t in tabs {
+                if t.path == path {
+                    t.path = next_path.clone();
+                    t.label = new_label.clone();
+                }
+            }
+        });
+        if self.active_tab.get_untracked().as_deref() == Some(&path) {
+            self.active_tab.set(Some(next_path.clone()));
+        }
+        if self.editor_path.get_untracked().as_deref() == Some(&path) {
+            self.editor_path.set(Some(next_path.clone()));
+            self.editor_title.set(new_label);
+        }
+        self.history.update(|h| {
+            for p in h {
+                if p == &path {
+                    *p = next_path.clone();
+                }
+            }
+        });
+        self.bump();
+        self.rebuild_link_index().await;
     }
 
     pub async fn rename_folder_to(self, path: String, next_name: String) {
         self.commit_doc().await;
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.rename_folder(&path, &next_name).await
-            } else {
-                Err("仓库未就绪".into())
-            }
-        };
-        match res {
-            Ok(next_path) => {
-                self.rewrite_open_prefix(&path, &next_path);
-                self.bump();
-                self.rebuild_link_index().await;
-                toast("已重命名文件夹");
-            }
-            Err(err) => {
+        let next_path = match self.with_vault(|v| v.plan_rename_folder(&path, &next_name)) {
+            Some(Ok(Some(next))) => next,
+            Some(Ok(None)) => return,
+            Some(Err(err)) => {
                 toast(format!("重命名失败：{err}"));
+                return;
             }
+            None => return,
+        };
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
+        };
+        if let Err(err) = fs.rename(&path, &next_path).await {
+            toast(format!("重命名失败：{err}"));
+            return;
         }
+        let index_json = self.with_vault_mut(|v| v.migrate_dir_prefix(&path, &next_path));
+        if let Some(json) = index_json {
+            let _ = fs.write(INDEX_PATH, &json, None).await;
+        }
+        self.persist_workspace_via(&fs).await;
+        self.rewrite_open_prefix(&path, &next_path);
+        self.rescan().await;
+        self.rebuild_link_index().await;
+        toast("已重命名文件夹");
     }
 
     pub async fn move_item(self, src_path: String, target_dir: String) {
         self.commit_doc().await;
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.move_item(&src_path, &target_dir).await
-            } else {
-                Err("仓库未就绪".into())
-            }
-        };
-        match res {
-            Ok(next_path) => {
-                self.rewrite_open_prefix(&src_path, &next_path);
-                if !target_dir.is_empty() {
-                    self.expanded_dirs.update(|s| {
-                        s.insert(target_dir);
-                    });
-                    self.persist_expanded();
-                }
-                self.bump();
-                self.rebuild_link_index().await;
-                toast("已移动");
-            }
-            Err(err) => {
+        let plan = match self.with_vault(|v| v.plan_move(&src_path, &target_dir)) {
+            Some(Ok(Some(plan))) => plan,
+            Some(Ok(None)) => return,
+            Some(Err(err)) => {
                 toast(err);
+                return;
             }
+            None => return,
+        };
+        let (next_path, is_dir) = plan;
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
+        };
+        if let Err(err) = fs.rename(&src_path, &next_path).await {
+            toast(err);
+            return;
         }
+        let index_json = self.with_vault_mut(|v| {
+            if is_dir {
+                v.migrate_dir_prefix(&src_path, &next_path)
+            } else {
+                v.migrate_note_path(&src_path, &next_path)
+            }
+        });
+        if let Some(json) = index_json {
+            let _ = fs.write(INDEX_PATH, &json, None).await;
+        }
+        self.persist_workspace_via(&fs).await;
+        self.rewrite_open_prefix(&src_path, &next_path);
+        if !target_dir.is_empty() {
+            self.expanded_dirs.update(|s| {
+                s.insert(target_dir);
+            });
+            self.persist_expanded();
+        }
+        self.rescan().await;
+        self.rebuild_link_index().await;
+        toast("已移动");
     }
 
     fn rewrite_open_prefix(&self, from: &str, to: &str) {
@@ -1104,172 +1167,224 @@ impl AppState {
     }
 
     pub async fn toggle_favorite(self, path: String) {
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.toggle_favorite(&path).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(fav) => {
-                self.bump();
-                toast(if fav { "已添加到收藏" } else { "已取消收藏" });
-            }
-            Err(err) => {
-                toast(err);
-            }
+        let Some((fav, json)) = self.with_vault_mut(|v| {
+            let fav = v.flip_favorite(&path);
+            (fav, v.index_json())
+        }) else {
+            return;
+        };
+        if let Err(err) = fs.write(INDEX_PATH, &json, None).await {
+            toast(err);
+            return;
         }
+        self.bump();
+        toast(if fav { "已添加到收藏" } else { "已取消收藏" });
     }
 
     pub async fn trash_note(self, path: String) {
         if self.editor_path.get_untracked().as_deref() == Some(&path) {
             self.commit_doc().await;
         }
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.trash_note(&path).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(_) => {
-                self.close_tab(&path).await;
-                self.bump();
-                self.rebuild_link_index().await;
-                toast("已移到回收站");
-            }
-            Err(err) => {
-                toast(format!("删除失败：{err}"));
-            }
+        let trash_path = join_path(TRASH_DIR, &format!("{}-{}", now_ms(), basename(&path)));
+        if let Err(err) = fs.rename(&path, &trash_path).await {
+            toast(format!("删除失败：{err}"));
+            return;
         }
+        let trash_json = self.with_vault_mut(|v| {
+            v.push_trash(&trash_path, &path);
+            v.trash_json()
+        });
+        if let Some(json) = trash_json {
+            let _ = fs.write(TRASH_PATH, &json, None).await;
+        }
+        self.persist_workspace_via(&fs).await;
+        self.close_tab(&path).await;
+        self.rescan().await;
+        self.rebuild_link_index().await;
+        toast("已移到回收站");
     }
 
     pub async fn duplicate_note(self, path: String) {
         self.commit_doc().await;
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.duplicate_note(&path).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(new_path) => {
-                self.bump();
-                self.open_file(&new_path, true).await;
-                self.rebuild_link_index().await;
-                toast("已创建副本");
-            }
-            Err(err) => {
-                toast(format!("复制失败：{err}"));
-            }
+        let dir = dirname(&path);
+        let base = format!("{} 副本", strip_ext(&basename(&path)));
+        let Some(new_path) = self.with_vault(|v| v.plan_new_note(&dir, &base)) else {
+            return;
+        };
+        let cached = self.with_vault(|v| v.cached_text(&path).cloned()).flatten();
+        let content = match cached {
+            Some(text) => text,
+            None => match fs.read(&path).await {
+                Ok(Some(text)) => text,
+                Ok(None) => String::new(),
+                Err(err) => {
+                    toast(format!("复制失败：{err}"));
+                    return;
+                }
+            },
+        };
+        if let Err(err) = fs.write(&new_path, &content, None).await {
+            toast(format!("复制失败：{err}"));
+            return;
         }
+        let index_json = self.with_vault_mut(|v| v.index_register(&new_path));
+        if let Some(json) = index_json {
+            let _ = fs.write(INDEX_PATH, &json, None).await;
+        }
+        self.rescan().await;
+        self.open_file(&new_path, true).await;
+        self.rebuild_link_index().await;
+        toast("已创建副本");
     }
 
     pub async fn delete_folder(self, path: String) {
         self.commit_doc().await;
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.delete_folder(&path).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(()) => {
-                let prefix = format!("{path}/");
-                self.open_tabs.update(|tabs| {
-                    tabs.retain(|t| t.path != path && !t.path.starts_with(&prefix));
-                });
-                if let Some(cur) = self.active_tab.get_untracked() {
-                    if cur == path || cur.starts_with(&prefix) {
-                        self.active_tab.set(None);
-                        self.editor_path.set(None);
-                    }
-                }
-                self.bump();
-                self.rebuild_link_index().await;
-                toast("已删除文件夹");
-            }
-            Err(err) => {
-                toast(format!("删除失败：{err}"));
+        if let Err(err) = fs.remove(&path).await {
+            toast(format!("删除失败：{err}"));
+            return;
+        }
+        let payload = self.with_vault_mut(|v| (v.forget_path(&path), v.workspace_json()));
+        if let Some((index_json, ws_json)) = payload {
+            let _ = fs.write(INDEX_PATH, &index_json, None).await;
+            let _ = fs.write(WORKSPACE_PATH, &ws_json, None).await;
+        }
+        let prefix = format!("{path}/");
+        self.open_tabs.update(|tabs| {
+            tabs.retain(|t| t.path != path && !t.path.starts_with(&prefix));
+        });
+        if let Some(cur) = self.active_tab.get_untracked() {
+            if cur == path || cur.starts_with(&prefix) {
+                self.active_tab.set(None);
+                self.editor_path.set(None);
             }
         }
+        self.rescan().await;
+        self.rebuild_link_index().await;
+        toast("已删除文件夹");
     }
 
     pub async fn restore_trash(self, trash_path: String) {
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.restore_trash(&trash_path).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(restored) => {
-                self.bump();
-                self.open_file(&restored, true).await;
-                self.rebuild_link_index().await;
-                toast("已恢复笔记");
-            }
-            Err(err) => {
+        let Some(entry) = self
+            .with_vault(|v| v.trash_entry(&trash_path))
+            .flatten()
+        else {
+            toast("回收站里找不到这篇笔记");
+            return;
+        };
+
+        let dir = dirname(&entry.original_path);
+        if !dir.is_empty() {
+            if let Err(err) = fs.mkdir(&dir).await {
                 toast(err);
+                return;
             }
         }
+
+        let mut target = entry.original_path.clone();
+        match fs.exists(&target).await {
+            Ok(true) => {
+                let ext = get_file_ext(&target);
+                let dot_ext = if ext.is_empty() {
+                    ".md".to_string()
+                } else {
+                    format!(".{ext}")
+                };
+                let stem = strip_ext(&basename(&target));
+                if let Some(unique) = self.with_vault(|v| v.unique_name(&dir, &stem, &dot_ext)) {
+                    target = join_path(&dir, &format!("{unique}{dot_ext}"));
+                }
+            }
+            Ok(false) => {}
+            Err(err) => {
+                toast(err);
+                return;
+            }
+        }
+
+        if let Err(err) = fs.rename(&trash_path, &target).await {
+            toast(err);
+            return;
+        }
+        let trash_json = self.with_vault_mut(|v| {
+            v.drop_trash(&trash_path);
+            if let Some(cached) = v.cache.remove(&trash_path) {
+                v.cache.insert(target.clone(), cached);
+            }
+            v.trash_json()
+        });
+        if let Some(json) = trash_json {
+            let _ = fs.write(TRASH_PATH, &json, None).await;
+        }
+        self.rescan().await;
+        self.open_file(&target, true).await;
+        self.rebuild_link_index().await;
+        toast("已恢复笔记");
     }
 
     pub async fn delete_forever(self, trash_path: String) {
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.delete_forever(&trash_path).await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(()) => {
-                self.bump();
-                toast("已永久删除");
-            }
-            Err(err) => {
-                toast(err);
-            }
+        if let Err(err) = fs.remove(&trash_path).await {
+            toast(err);
+            return;
         }
+        let entry = self
+            .with_vault(|v| v.trash_entry(&trash_path))
+            .flatten();
+        let payload = self.with_vault_mut(|v| {
+            if let Some(e) = &entry {
+                v.index.notes.remove(&e.original_path);
+            }
+            v.drop_trash(&trash_path);
+            v.cache.remove(&trash_path);
+            (v.index_json(), v.trash_json())
+        });
+        if let Some((index_json, trash_json)) = payload {
+            let _ = fs.write(INDEX_PATH, &index_json, None).await;
+            let _ = fs.write(TRASH_PATH, &trash_json, None).await;
+        }
+        self.rescan().await;
+        toast("已永久删除");
     }
 
     pub async fn empty_trash(self) {
-        let res = {
-            let cell = self.vault.get_value();
-            let mut guard = cell.borrow_mut();
-            if let Some(v) = guard.as_mut() {
-                v.empty_trash().await
-            } else {
-                Err("仓库未就绪".into())
-            }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
         };
-        match res {
-            Ok(()) => {
-                self.bump();
-                toast("已清空回收站");
-            }
-            Err(err) => {
-                toast(err);
-            }
+        let items = self.with_vault_mut(|v| v.drain_trash()).unwrap_or_default();
+        for item in &items {
+            let _ = fs.remove(&item.path).await;
         }
+        let payload = self.with_vault_mut(|v| (v.index_json(), v.trash_json()));
+        if let Some((index_json, trash_json)) = payload {
+            let _ = fs.write(INDEX_PATH, &index_json, None).await;
+            let _ = fs.write(TRASH_PATH, &trash_json, None).await;
+        }
+        self.rescan().await;
+        toast("已清空回收站");
     }
 
     pub async fn open_wikilink(self, target: String) {
@@ -1391,19 +1506,47 @@ impl AppState {
             return;
         }
         spawn_local(async move {
-            let hits = {
-                let cell = self.vault.get_value();
-                let mut guard = cell.borrow_mut();
-                if let Some(v) = guard.as_mut() {
-                    v.search(&query, 60).await
-                } else {
-                    Vec::new()
-                }
+            let Some((fs, notes)) = self.with_vault(|v| (v.fs.clone(), v.flat_notes())) else {
+                return;
             };
+            // 先把要检索的文本凑齐，再进纯内存的匹配：中间不持有任何借用
+            let mut texts: HashMap<String, String> = HashMap::new();
+            for note in &notes {
+                let cached = self
+                    .with_vault(|v| v.cached_text(&note.path).cloned())
+                    .flatten();
+                let text = match cached {
+                    Some(text) => text,
+                    None => match fs.read(&note.path).await {
+                        Ok(Some(text)) => text,
+                        _ => String::new(),
+                    },
+                };
+                texts.insert(note.path.clone(), text);
+            }
+            let hits = self
+                .with_vault(|v| v.search(&texts, &query, 60))
+                .unwrap_or_default();
             if self.search_query.get_untracked() == query {
                 self.search_hits.set(hits);
             }
         });
+    }
+
+    /// 把粘贴/拖入的图片写进 `attachments/`，返回相对路径。
+    pub async fn save_attachment(self, filename: String, data_url: String) -> Result<String, String> {
+        let fs = self.vault_fs().ok_or_else(|| "仓库未就绪".to_string())?;
+        fs.mkdir("attachments").await?;
+        let clean = sanitize_name(&filename);
+        let name = if clean.is_empty() {
+            format!("attachment_{}.png", now_ms())
+        } else {
+            clean
+        };
+        let rel = join_path("attachments", &name);
+        fs.write_binary(&rel, &data_url).await?;
+        self.rescan().await;
+        Ok(rel)
     }
 
     pub fn filter_by_tag(&self, tag: String) {
@@ -1516,6 +1659,13 @@ impl AppState {
                 });
             }
         });
+    }
+
+    /// 把工作区状态落盘（调用方已经在借用之外拿到了 fs 句柄）。
+    async fn persist_workspace_via(&self, fs: &VaultFs) {
+        if let Some(json) = self.with_vault(|v| v.workspace_json()) {
+            let _ = fs.write(WORKSPACE_PATH, &json, None).await;
+        }
     }
 
     /* ---------------- 桌面窗口与外部操作 ---------------- */
