@@ -97,6 +97,8 @@ fn render_inline(text: &str) -> String {
     s = replace_delimited(&s, "**", "strong");
     s = replace_delimited(&s, "__", "strong");
     s = replace_delimited(&s, "~~", "del");
+    // Obsidian 的 ==高亮==：语义是「标记」，配色里单独占一档
+    s = replace_delimited(&s, "==", "mark");
     s = replace_single_delimited(&s, '*', "em");
     s = replace_single_delimited(&s, '_', "em");
 

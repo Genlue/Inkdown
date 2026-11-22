@@ -36,6 +36,14 @@ pub fn SettingsPage() -> impl IntoView {
     let state = AppState::get();
     let theme = use_context::<Theme>().expect("Theme must be provided");
 
+    // 玻璃效果档位由库写在 <html data-gd-effects> 上，这里只是镜像成 Select 的值
+    let effects_value = RwSignal::new(effects().as_str().to_string());
+    let effects_options = vec![
+        SelectOption::new("auto", "完整效果"),
+        SelectOption::new("blur", "仅模糊"),
+        SelectOption::new("solid", "性能优先"),
+    ];
+
     let mode_options = vec![
         SegmentedOption::new("light", "浅色").icon(IconName::SUN),
         SegmentedOption::new("dark", "深色").icon(IconName::MOON),
@@ -47,6 +55,23 @@ pub fn SettingsPage() -> impl IntoView {
         SegmentedOption::new("lines", "连续引导线"),
         SegmentedOption::new("boxes", "简约框"),
         SegmentedOption::new("none", "无"),
+    ];
+
+    let folder_color_options = vec![
+        SegmentedOption::new("auto", "按层级上色"),
+        SegmentedOption::new("off", "关闭"),
+    ];
+
+    let folder_style_options = vec![
+        SegmentedOption::new("icon", "仅图标"),
+        SegmentedOption::new("text", "图标与名称"),
+        SegmentedOption::new("rail", "左侧色条"),
+    ];
+
+    let md_color_options = vec![
+        SegmentedOption::new("off", "关闭"),
+        SegmentedOption::new("soft", "克制"),
+        SegmentedOption::new("vivid", "鲜明"),
     ];
 
     let width_options = vec![
@@ -172,9 +197,24 @@ pub fn SettingsPage() -> impl IntoView {
                                         label="玻璃效果"
                                         hint="低配设备可关掉折射与模糊；选择即时生效并记住，刷新后由库恢复"
                                     >
-                                        <div class="ink-effects-setting">
-                                            <GlassEffectsSetting />
-                                        </div>
+                                        // 不用库里的 GlassEffectsSetting：那是原生 <select>，
+                                        // 下拉由 WebView2 自己画，深色主题下会变成白底 + 白字。
+                                        // 这里换成本库的 Select（自绘浮层，跟随主题令牌）。
+                                        {move || view! {
+                                            <Select
+                                                options=effects_options.clone()
+                                                value=Signal::derive(move || effects_value.get())
+                                                width=150
+                                                label="玻璃效果"
+                                                on_change=Callback::new(move |v: String| {
+                                                    if let Some(mode) = GlassEffects::from_value(&v) {
+                                                        set_effects(mode);
+                                                        save_effects_preference(mode);
+                                                        effects_value.set(v);
+                                                    }
+                                                })
+                                            />
+                                        }}
                                     </Row>
                                     <Divider />
                                     <Row label="玻璃浓淡 (--lg)" hint="0 = 通透折射，1 = 高对比饱和磨砂" wide=true>
@@ -196,11 +236,52 @@ pub fn SettingsPage() -> impl IntoView {
                                             on_change=Callback::new(move |s: String| state.set_tree_indent(s))
                                         />
                                     </Row>
+                                    <Divider />
+                                    <Row label="彩虹文件夹" hint="同层不撞色，按层级轮转色板；右键目录可单独指定颜色">
+                                        <Segmented
+                                            options=folder_color_options
+                                            value=Signal::derive(move || state.folder_color_mode.get())
+                                            on_change=Callback::new(move |s: String| state.set_folder_color_mode(s))
+                                        />
+                                    </Row>
+                                    <Divider />
+                                    <Row label="着色范围" hint="只染图标最克制；染名称会让整棵树更抢眼，也更吵">
+                                        <Segmented
+                                            options=folder_style_options
+                                            value=Signal::derive(move || state.folder_color_style.get())
+                                            on_change=Callback::new(move |s: String| state.set_folder_color_style(s))
+                                        />
+                                    </Row>
+                                    <Divider />
+                                    <Row label="沉浸文件夹" hint="开启后只让当前笔记所在目录可读，其余目录名变成色条；文件树顶栏有开关">
+                                        <div class="l-row l-row--0">
+                                            <Switch
+                                                checked=Signal::derive(move || state.immersive_collapse.get())
+                                                on_change=Callback::new(move |v: bool| state.set_immersive_collapse(v))
+                                            />
+                                            <span class="c-caption">"顺带折叠其它目录"</span>
+                                        </div>
+                                    </Row>
+                                    <Divider />
+                                    <Row label="保留上级路径" hint="沉浸时仍能看清自己在哪一层目录里">
+                                        <Switch
+                                            checked=Signal::derive(move || state.immersive_keep_ancestors.get())
+                                            on_change=Callback::new(move |v: bool| state.set_immersive_keep_ancestors(v))
+                                        />
+                                    </Row>
                                 </Card>
 
                                 // 3. 字体与排版
                                 <SectionTitle>"字体与排版"</SectionTitle>
                                 <Card>
+                                    <Row label="Markdown 配色" hint="标题按强调色的浓度阶梯区分层级；链接用强调色、高亮用琥珀、已完成任务用绿色——颜色只编码这三类语义">
+                                        <Segmented
+                                            options=md_color_options
+                                            value=Signal::derive(move || state.md_color.get())
+                                            on_change=Callback::new(move |m: String| state.set_md_color(m))
+                                        />
+                                    </Row>
+                                    <Divider />
                                     <Row label="界面字体" hint="应用于顶栏、侧边栏、标签页与控件">
                                         {move || view! {
                                             <Select

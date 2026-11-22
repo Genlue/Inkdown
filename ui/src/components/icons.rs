@@ -45,3 +45,8 @@ pub const ICON_FILE_PLUS: IconName = IconName::custom(
 pub const ICON_TABLE: IconName = IconName::custom(
     "<path d=\"M12 3v18\"/><rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M3 9h18\"/><path d=\"M3 15h18\"/>",
 );
+
+/// 沉浸模式：四角取景框，像把镜头对准当前目录。
+pub const ICON_IMMERSIVE: IconName = IconName::custom(
+    "<path d=\"M4 9V6a2 2 0 0 1 2-2h3\"/><path d=\"M20 9V6a2 2 0 0 0-2-2h-3\"/><path d=\"M4 15v3a2 2 0 0 0 2 2h3\"/><path d=\"M20 15v3a2 2 0 0 1-2 2h-3\"/><circle cx=\"12\" cy=\"12\" r=\"2.2\"/>",
+);

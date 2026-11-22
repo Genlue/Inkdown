@@ -12,6 +12,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use components::boot_screen::BootScreen;
 use components::dialogs::AppDialogsAndMenus;
 use components::editor_workspace::EditorWorkspace;
 use components::file_pane::FilePane;
@@ -41,6 +42,13 @@ pub fn start() {
     glass_design::restore_effects_preference();
     glass_design::install();
     leptos::mount::mount_to_body(App);
+    // 静态过渡屏只负责「点开 exe → WASM 起来」这段白板时间；App 首帧一落地
+    // 就交给带真实进度的 BootScreen，两个屏之间不留空档。
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("boot-splash") {
+            el.remove();
+        }
+    }
 }
 
 fn install_window_listeners(state: AppState) {
@@ -278,6 +286,8 @@ fn App() -> impl IntoView {
     let theme = Theme::provide();
     let state = AppState::provide(theme);
     install_window_listeners(state);
+    // 检查器拖拽的起点（指针 x, 起始宽度）；不落盘，松手即清
+    let inspector_drag = RwSignal::new(None::<(f64, f64)>);
 
     let document_area = move || {
         view! {
@@ -337,11 +347,48 @@ fn App() -> impl IntoView {
 
     let doc_plus_inspector = move || {
         view! {
-            <div class="ink-doc-shell">
+            <div
+                class="ink-doc-shell"
+                style=move || format!("--insp-w:{}px", state.inspector_width.get())
+            >
                 <div class="ink-doc-shell__main">
                     {document_area()}
                 </div>
                 <Show when=move || !state.inspector_hidden.get()>
+                    <div
+                        class="ink-insp-grip"
+                        title="拖动调整检查器宽度，双击复位"
+                        data-drag=move || (inspector_drag.get().is_some()).then_some("1")
+                        on:pointerdown=move |ev: web_sys::PointerEvent| {
+                            ev.prevent_default();
+                            if let Some(el) = ev
+                                .current_target()
+                                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                            {
+                                let _ = el.set_pointer_capture(ev.pointer_id());
+                            }
+                            inspector_drag.set(Some((
+                                ev.client_x() as f64,
+                                state.inspector_width.get_untracked(),
+                            )));
+                        }
+                        on:pointermove=move |ev: web_sys::PointerEvent| {
+                            if let Some((x0, w0)) = inspector_drag.get_untracked() {
+                                let next = w0 - (ev.client_x() as f64 - x0);
+                                state.set_inspector_width(next, false);
+                            }
+                        }
+                        on:pointerup=move |_| {
+                            if inspector_drag.get_untracked().is_some() {
+                                inspector_drag.set(None);
+                                state.set_inspector_width(
+                                    state.inspector_width.get_untracked(),
+                                    true,
+                                );
+                            }
+                        }
+                        on:dblclick=move |_| state.set_inspector_width(252.0, true)
+                    ></div>
                     <InspectorPane />
                 </Show>
             </div>
@@ -356,14 +403,7 @@ fn App() -> impl IntoView {
             <Main>
                 {move || {
                     if !state.ready.get() {
-                        return view! {
-                            <Center>
-                                <Stack>
-                                    <Spinner />
-                                    <span class="c-subtitle">"正在打开知识库…"</span>
-                                </Stack>
-                            </Center>
-                        }.into_any();
+                        return view! { <BootScreen stage=state.boot_stage.get() /> }.into_any();
                     }
 
                     if let Some(err) = state.load_error.get() {

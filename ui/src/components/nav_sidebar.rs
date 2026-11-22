@@ -103,13 +103,6 @@ pub fn AppNavSidebar() -> impl IntoView {
                     on_click=Callback::new(move |_| state.shortcuts_open.set(true))
                 />
             </NavGroup>
-
-            <div class="l-nav__foot">
-                <div class="ink-foot">
-                    <span class="ink-foot__dot" aria-hidden="true"></span>
-                    <span>{if state.is_desktop { "本地文件 · 自动保存" } else { "浏览器沙盒 · 自动保存" }}</span>
-                </div>
-            </div>
         </NavColumn>
     }
 }

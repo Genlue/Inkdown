@@ -1,6 +1,6 @@
 [package]
 name = "inkdown"
-version = "1.0.4"
+version = "1.0.10"
 description = "Inkdown · 本地优先的 Markdown 笔记应用"
 authors = ["Inkdown"]
 edition = "2021"

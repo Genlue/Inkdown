@@ -1,7 +1,7 @@
 //! 应用全局响应式状态与业务动作编排。
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use glass_design::prelude::*;
@@ -20,8 +20,9 @@ use crate::vault::fs::{
 };
 use crate::vault::links::{build_index, resolve_wikilink_path, IndexInput, LinkIndex};
 use crate::vault::{
-    sanitize_name, NoteInfo, SearchHit, TrashEntry, Vault, VaultCounts, VaultTreeNode, INDEX_PATH,
-    TRASH_DIR, TRASH_PATH, WORKSPACE_PATH,
+    arm_boot_report, disarm_boot_report, sanitize_name, yield_paint, BootStage, NoteInfo,
+    SearchHit, TrashEntry, Vault, VaultCounts, VaultTreeNode, INDEX_PATH, TRASH_DIR, TRASH_PATH,
+    WORKSPACE_PATH,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,12 +100,41 @@ pub struct ContextMenuState {
     pub kind: ContextMenuKind,
 }
 
+/// 版本历史弹窗：列出某篇笔记的本地快照，可预览再恢复。
+#[derive(Clone, Debug)]
+pub struct HistoryDialogState {
+    pub path: String,
+    pub title: String,
+    pub versions: Vec<u64>,
+    pub selected: Option<u64>,
+    pub preview: String,
+    pub loading: bool,
+}
+
+/// 本地版本快照的落盘位置与节流参数。
+/// 快照是"每次保存都可能写"的动作，节流与上限必须在这里定死，
+/// 否则长文档写一上午就是几千个文件。
+const HISTORY_DIR: &str = ".inkdown/history";
+const HISTORY_INDEX: &str = ".inkdown/history/index.json";
+const HISTORY_KEEP: usize = 50;
+const HISTORY_MIN_GAP_MS: u64 = 120_000;
+
+fn history_key(path: &str) -> String {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in path.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{hash:08x}")
+}
+
 #[derive(Clone, Copy)]
 pub struct AppState {
     pub vault: StoredValue<Rc<RefCell<Option<Vault>>>, leptos::reactive::owner::LocalStorage>,
     pub vault_rev: RwSignal<u64>,
     pub ready: RwSignal<bool>,
     pub load_error: RwSignal<Option<String>>,
+    pub boot_stage: RwSignal<BootStage>,
 
     pub link_index: RwSignal<LinkIndex>,
     pub indexing: RwSignal<bool>,
@@ -128,11 +158,31 @@ pub struct AppState {
     pub list_hidden: RwSignal<bool>,
     pub inspector_hidden: RwSignal<bool>,
     pub inspector_tab: RwSignal<String>,
+    pub inspector_width: RwSignal<f64>,
 
     pub sort_mode: RwSignal<String>,
     pub tree_indent: RwSignal<String>,
+    pub folder_color_mode: RwSignal<String>,
+    pub folder_color_style: RwSignal<String>,
+    pub md_color: RwSignal<String>,
     pub expanded_dirs: RwSignal<HashSet<String>>,
     pub recents_open: RwSignal<bool>,
+
+    /// 沉浸文件夹：只保留当前笔记所在目录可读，其余目录名盖成色条。
+    pub immersive: RwSignal<bool>,
+    pub immersive_collapse: RwSignal<bool>,
+    pub immersive_keep_ancestors: RwSignal<bool>,
+    pub immersive_keep_inside: RwSignal<bool>,
+    immersive_stash: RwSignal<Option<HashSet<String>>>,
+
+    /// 文件树多选：路径集合 + Shift 连选的锚点。
+    pub selection: RwSignal<HashSet<String>>,
+    pub selection_anchor: RwSignal<Option<String>>,
+    /// 批量选择模式：进入后单击即勾选，不需要按 Ctrl。
+    pub select_mode: RwSignal<bool>,
+
+    pub history_dialog: RwSignal<Option<HistoryDialogState>>,
+    history_manifest: StoredValue<BTreeMap<String, Vec<u64>>, leptos::reactive::owner::LocalStorage>,
 
     pub search_query: RwSignal<String>,
     pub search_hits: RwSignal<Vec<SearchHit>>,
@@ -178,6 +228,7 @@ impl AppState {
             vault_rev: RwSignal::new(0),
             ready: RwSignal::new(false),
             load_error: RwSignal::new(None),
+            boot_stage: RwSignal::new(BootStage::Locating),
             link_index: RwSignal::new(LinkIndex::default()),
             indexing: RwSignal::new(false),
             nav_page: RwSignal::new(NavPage::Files),
@@ -197,10 +248,24 @@ impl AppState {
             list_hidden: RwSignal::new(false),
             inspector_hidden: RwSignal::new(false),
             inspector_tab: RwSignal::new("大纲".to_string()),
+            inspector_width: RwSignal::new(252.0),
             sort_mode: RwSignal::new("updated".to_string()),
             tree_indent: RwSignal::new("lines".to_string()),
+            folder_color_mode: RwSignal::new("auto".to_string()),
+            folder_color_style: RwSignal::new("icon".to_string()),
+            md_color: RwSignal::new("soft".to_string()),
             expanded_dirs: RwSignal::new(HashSet::new()),
             recents_open: RwSignal::new(false),
+            immersive: RwSignal::new(false),
+            immersive_collapse: RwSignal::new(true),
+            immersive_keep_ancestors: RwSignal::new(true),
+            immersive_keep_inside: RwSignal::new(true),
+            immersive_stash: RwSignal::new(None),
+            selection: RwSignal::new(HashSet::new()),
+            selection_anchor: RwSignal::new(None),
+            select_mode: RwSignal::new(false),
+            history_dialog: RwSignal::new(None),
+            history_manifest: StoredValue::new_local(BTreeMap::new()),
             search_query: RwSignal::new(String::new()),
             search_hits: RwSignal::new(Vec::new()),
             search_focus_tick: RwSignal::new(0),
@@ -247,10 +312,28 @@ impl AppState {
     fn boot(self, theme: Theme) {
         let state = self;
         spawn_local(async move {
-            match Vault::open_or_create().await {
+            // 进度只前进不后退：refresh() 在启动之外也会被调用，阶段可能重叠
+            arm_boot_report(move |stage| {
+                let cur = state.boot_stage.get_untracked();
+                if stage.percent() > cur.percent() {
+                    state.boot_stage.set(stage);
+                }
+            });
+            let vault = Vault::open_or_create().await;
+            // 让最后一个内部阶段至少绘制过一帧，再接着做设置初始化
+            yield_paint().await;
+            match vault {
                 Ok(v) => {
                     let s = v.settings.clone();
                     let w = v.workspace.clone();
+                    // 版本历史的清单在启动时读一次，之后全靠内存维护，
+                    // 避免每次保存都去列一遍 .inkdown/history。
+                    let history_raw = v.fs.read(HISTORY_INDEX).await.ok().flatten();
+                    state.history_manifest.set_value(
+                        history_raw
+                            .and_then(|raw| serde_json::from_str::<BTreeMap<String, Vec<u64>>>(&raw).ok())
+                            .unwrap_or_default(),
+                    );
 
                     // 初始化主题与外观令牌
                     let mode = match s.appearance.mode.as_str() {
@@ -267,6 +350,13 @@ impl AppState {
                     state.accent_hex.set(s.appearance.accent.clone());
                     state.glass_level.set(s.appearance.glass.clamp(0.0, 1.0));
                     state.tree_indent.set(s.appearance.tree_indent.clone());
+                    state
+                        .folder_color_mode
+                        .set(s.appearance.folder_color_mode.clone());
+                    state
+                        .folder_color_style
+                        .set(s.appearance.folder_color_style.clone());
+                    state.md_color.set(s.appearance.md_color.clone());
                     state.view_mode.set(if matches!(w.mode.as_str(), "edit" | "split" | "preview") {
                         w.mode.clone()
                     } else {
@@ -275,6 +365,9 @@ impl AppState {
                     state.nav_hidden.set(w.nav_hidden);
                     state.list_hidden.set(w.list_hidden);
                     state.inspector_hidden.set(!w.sidebar);
+                    state
+                        .inspector_width
+                        .set(w.inspector_width.clamp(200.0, 460.0));
                     state.inspector_tab.set(match w.view.as_str() {
                         "relations" | "关联" => "关联".to_string(),
                         "info" | "信息" => "信息".to_string(),
@@ -283,6 +376,10 @@ impl AppState {
                     state.sort_mode.set(v.sort.clone());
                     state.expanded_dirs.set(w.expanded.iter().cloned().collect());
                     state.recents_open.set(w.recents_open);
+                    state.immersive.set(w.immersive);
+                    state.immersive_collapse.set(w.immersive_collapse);
+                    state.immersive_keep_ancestors.set(w.immersive_keep_ancestors);
+                    state.immersive_keep_inside.set(w.immersive_keep_inside);
                     state.editor_font_size.set(w.font_size.clamp(11.0, 26.0));
                     state.line_width.set(s.editor.line_width.clone());
                     state.auto_continue_lists.set(s.editor.auto_continue_lists);
@@ -340,20 +437,42 @@ impl AppState {
                         *cell.borrow_mut() = Some(v);
                     });
                     state.open_tabs.set(initial_tabs);
-                    state.ready.set(true);
                     state.bump();
 
                     if let Some(p) = target_open {
+                        state.boot_stage.set(BootStage::Restoring);
+                        yield_paint().await;
                         state.open_file(&p, true).await;
                     }
 
-                    state.rebuild_link_index().await;
+                    // 进度走完再撤掉启动屏：用户看到的是完整的一条进度，
+                    // 而不是内容还没加载完就闪进一个空编辑器。
+                    state.boot_stage.set(BootStage::Ready);
+                    yield_paint().await;
+                    disarm_boot_report();
+                    state.ready.set(true);
+
+                    // 链接索引要读全库正文，大仓库里这一趟能拖好几秒。
+                    // 先让第一屏可以交互，再把索引放到后台补；编辑保存也会再触发。
+                    let for_index = state;
+                    let cb = Closure::once_into_js(move || {
+                        spawn_local(async move {
+                            for_index.rebuild_link_index().await;
+                        });
+                    });
+                    if let Some(w) = web_sys::window() {
+                        let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                            cb.unchecked_ref(),
+                            900,
+                        );
+                    }
 
                     if is_desktop {
                         state.install_desktop_listeners();
                     }
                 }
                 Err(err) => {
+                    disarm_boot_report();
                     state.load_error.set(Some(err));
                     state.ready.set(true);
                 }
@@ -364,7 +483,7 @@ impl AppState {
     fn install_desktop_listeners(self) {
         let state = self;
         listen_tauri_event("vault://fs-change", move |payload| {
-            let paths: Vec<String> = payload
+            let mut paths: Vec<String> = payload
                 .get("paths")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -373,6 +492,14 @@ impl AppState {
                         .collect()
                 })
                 .unwrap_or_default();
+            // 快照、索引、工作区都写在 .inkdown/ 下，它们每次落盘都会触发监听事件。
+            // 这些路径不会出现在树里，没必要为了它们整仓 re-walk。
+            if !paths.is_empty() {
+                paths.retain(|p| !is_hidden(p));
+                if paths.is_empty() {
+                    return;
+                }
+            }
             spawn_local(async move {
                 state.handle_external_fs_change(paths).await;
             });
@@ -439,6 +566,10 @@ impl AppState {
     }
 
     pub async fn rebuild_link_index(self) {
+        // 启动补建与保存后的重建可能撞在一起；这一趟要读全库，别叠着跑
+        if self.indexing.get_untracked() {
+            return;
+        }
         self.indexing.set(true);
         let Some((fs, notes)) = self.with_vault(|v| (v.fs.clone(), v.flat_notes())) else {
             self.indexing.set(false);
@@ -662,6 +793,7 @@ impl AppState {
         match res {
             Ok(()) => {
                 self.with_vault_mut(|v| v.mark_saved(&path, &content, mtime));
+                self.snapshot_note(&fs, &path, &content, false).await;
                 self.saved_content.set(content);
                 self.save_status.set(SaveStatus::Saved);
                 self.mark_tab_dirty(&path, false);
@@ -1036,6 +1168,7 @@ impl AppState {
         if let Some(json) = index_json {
             let _ = fs.write(INDEX_PATH, &json, None).await;
         }
+        self.migrate_history(&fs, &path, &next_path).await;
         self.persist_workspace_via(&fs).await;
 
         let new_label = strip_ext(&basename(&next_path));
@@ -1088,6 +1221,9 @@ impl AppState {
         if let Some(json) = index_json {
             let _ = fs.write(INDEX_PATH, &json, None).await;
         }
+        // 颜色的 key 也是路径，跟着目录一起搬
+        self.persist_settings();
+        self.migrate_history(&fs, &path, &next_path).await;
         self.persist_workspace_via(&fs).await;
         self.rewrite_open_prefix(&path, &next_path);
         self.rescan().await;
@@ -1125,6 +1261,10 @@ impl AppState {
         if let Some(json) = index_json {
             let _ = fs.write(INDEX_PATH, &json, None).await;
         }
+        if is_dir {
+            self.persist_settings();
+        }
+        self.migrate_history(&fs, &src_path, &next_path).await;
         self.persist_workspace_via(&fs).await;
         self.rewrite_open_prefix(&src_path, &next_path);
         if !target_dir.is_empty() {
@@ -1596,6 +1736,538 @@ impl AppState {
         self.patch_settings(|s| s.appearance.tree_indent = style);
     }
 
+    /* ---------------- 文件夹颜色（彩虹文件夹） ---------------- */
+
+    pub fn set_folder_color_mode(&self, mode: String) {
+        self.folder_color_mode.set(mode.clone());
+        self.patch_settings(|s| s.appearance.folder_color_mode = mode);
+        self.recolor_tree();
+    }
+
+    pub fn set_folder_color_style(&self, style: String) {
+        self.folder_color_style.set(style.clone());
+        self.patch_settings(|s| s.appearance.folder_color_style = style);
+    }
+
+    pub fn set_md_color(&self, mode: String) {
+        self.md_color.set(mode.clone());
+        self.patch_settings(|s| s.appearance.md_color = mode);
+    }
+
+    /// 手动指定或清除某个目录的颜色；`key` 传 None 表示回到「跟随层级」。
+    pub fn set_folder_color(&self, path: String, key: Option<String>) {
+        let p = path.clone();
+        self.patch_settings(move |s| match key {
+            Some(k) => {
+                s.folder_colors.insert(p, k);
+            }
+            None => {
+                s.folder_colors.remove(&p);
+            }
+        });
+        self.recolor_tree();
+    }
+
+    pub fn folder_color_key(&self, path: &str) -> Option<String> {
+        self.with_vault(|v| v.settings.folder_colors.get(path).cloned())
+            .flatten()
+    }
+
+    fn recolor_tree(&self) {
+        self.with_vault_mut(|v| v.tree = v.build_tree());
+        self.bump();
+    }
+
+    /* ---------------- 沉浸文件夹 ---------------- */
+
+    pub fn focus_dir(&self) -> String {
+        self.active_tab
+            .get_untracked()
+            .map(|p| dirname(&p))
+            .unwrap_or_default()
+    }
+
+    pub fn toggle_immersive(&self) {
+        if self.immersive.get_untracked() {
+            self.exit_immersive();
+        } else {
+            self.enter_immersive(None);
+        }
+    }
+
+    /// `focus` 为 None 时取当前笔记所在目录。开启时把展开态存起来，
+    /// 退出时原样还回去——沉浸只是「看的方式」，不该改用户的工作区。
+    pub fn enter_immersive(&self, focus: Option<String>) {
+        let focus = focus.unwrap_or_else(|| self.focus_dir());
+        if focus.is_empty() {
+            toast("先在某个文件夹里打开一篇笔记，再开启沉浸模式");
+            return;
+        }
+        if !self.immersive.get_untracked() {
+            self.immersive_stash.set(Some(self.expanded_dirs.get_untracked()));
+        }
+        if self.immersive_collapse.get_untracked() {
+            let mut keep: HashSet<String> = HashSet::new();
+            let mut cur = focus.clone();
+            while !cur.is_empty() {
+                keep.insert(cur.clone());
+                cur = dirname(&cur);
+            }
+            if self.immersive_keep_inside.get_untracked() {
+                let prefix = format!("{focus}/");
+                let inside: Vec<String> = self
+                    .with_vault(|v| {
+                        v.entries
+                            .iter()
+                            .filter(|e| {
+                                e.kind == "dir"
+                                    && !is_hidden(&e.path)
+                                    && e.path.starts_with(&prefix)
+                            })
+                            .map(|e| e.path.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                keep.extend(inside);
+            }
+            self.expanded_dirs.set(keep);
+        }
+        self.immersive.set(true);
+        self.patch_workspace(|w| w.immersive = true);
+        toast("沉浸模式：已遮住其他目录");
+    }
+
+    pub fn exit_immersive(&self) {
+        self.immersive.set(false);
+        if let Some(prev) = self.immersive_stash.get_untracked() {
+            self.expanded_dirs.set(prev);
+            self.immersive_stash.set(None);
+        }
+        self.patch_workspace(|w| w.immersive = false);
+    }
+
+    pub fn set_immersive_collapse(&self, on: bool) {
+        self.immersive_collapse.set(on);
+        self.patch_workspace(|w| w.immersive_collapse = on);
+    }
+
+    pub fn set_immersive_keep_ancestors(&self, on: bool) {
+        self.immersive_keep_ancestors.set(on);
+        self.patch_workspace(|w| w.immersive_keep_ancestors = on);
+    }
+
+    /* ---------------- 多选与批量操作 ---------------- */
+
+    pub fn clear_selection(&self) {
+        if !self.selection.get_untracked().is_empty() {
+            self.selection.set(HashSet::new());
+        }
+        self.selection_anchor.set(None);
+        self.select_mode.set(false);
+    }
+
+    /// 从右键菜单进入批量选择：把当前节点先选上，之后单击即勾选。
+    pub fn enter_select_mode(&self, path: &str) {
+        let mut next = HashSet::new();
+        if !path.is_empty() {
+            next.insert(path.to_string());
+        }
+        self.selection.set(next);
+        self.selection_anchor.set(Some(path.to_string()));
+        self.select_mode.set(true);
+        toast("批量选择：单击文件或文件夹即可勾选");
+    }
+
+    pub fn set_inspector_width(&self, width: f64, persist: bool) {
+        let clamped = width.clamp(200.0, 460.0);
+        self.inspector_width.set(clamped);
+        if persist {
+            self.patch_workspace(|w| w.inspector_width = clamped);
+        }
+    }
+
+    pub fn toggle_selection(&self, path: &str) {
+        self.selection.update(|set| {
+            if !set.remove(path) {
+                set.insert(path.to_string());
+            }
+        });
+        self.selection_anchor.set(Some(path.to_string()));
+    }
+
+    /// Shift 连选：按屏幕上可见的先后顺序取两端之间的全部节点。
+    pub fn select_range(&self, path: &str, order: &[String]) {
+        let anchor = self
+            .selection_anchor
+            .get_untracked()
+            .unwrap_or_else(|| path.to_string());
+        let (Some(a), Some(b)) = (
+            order.iter().position(|p| p == &anchor),
+            order.iter().position(|p| p == path),
+        ) else {
+            self.toggle_selection(path);
+            return;
+        };
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let picked: Vec<String> = order[lo..=hi].to_vec();
+        self.selection.update(|set| {
+            for p in picked {
+                set.insert(p);
+            }
+        });
+    }
+
+    pub async fn batch_favorite(&self, paths: Vec<String>, favorite: bool) {
+        // 收藏只对文件有意义：目录在「收藏」页里没有承载物
+        let paths: Vec<String> = paths
+            .into_iter()
+            .filter(|p| {
+                self.with_vault(|v| {
+                    v.entries
+                        .iter()
+                        .any(|e| e.path == *p && e.kind == "file")
+                })
+                .unwrap_or(false)
+            })
+            .collect();
+        if paths.is_empty() {
+            toast("文件夹不能收藏");
+            return;
+        }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
+        };
+        let json = self.with_vault_mut(|v| {
+            for path in &paths {
+                let entry = v.index.notes.entry(path.clone()).or_insert_with(|| {
+                    crate::vault::NoteIndexEntry {
+                        favorite: false,
+                        created_at: now_ms(),
+                    }
+                });
+                entry.favorite = favorite;
+            }
+            v.index_json()
+        });
+        if let Some(json) = json {
+            if let Err(err) = fs.write(INDEX_PATH, &json, None).await {
+                toast(err);
+                return;
+            }
+        }
+        self.clear_selection();
+        self.bump();
+        toast(if favorite {
+            format!("已收藏 {} 项", paths.len())
+        } else {
+            format!("已取消收藏 {} 项", paths.len())
+        });
+    }
+
+    /// 批量移到回收站。文件夹不在批量删除范围内——删目录是永久操作，
+    /// 必须走单个确认弹窗，批量给不了那种确认密度。
+    pub async fn batch_trash(&self, paths: Vec<String>) {
+        let files: Vec<String> = paths
+            .into_iter()
+            .filter(|p| self.with_vault(|v| v.entries.iter().any(|e| e.path == *p && e.kind == "file")).unwrap_or(false))
+            .collect();
+        if files.is_empty() {
+            toast("批量删除只支持笔记与文件");
+            return;
+        }
+        if self
+            .editor_path
+            .get_untracked()
+            .map(|p| files.contains(&p))
+            .unwrap_or(false)
+        {
+            self.commit_doc().await;
+        }
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
+        };
+        let mut moved = 0usize;
+        for path in &files {
+            let trash_path = join_path(TRASH_DIR, &format!("{}-{}", now_ms(), basename(path)));
+            if fs.rename(path, &trash_path).await.is_err() {
+                continue;
+            }
+            self.with_vault_mut(|v| v.push_trash(&trash_path, path));
+            moved += 1;
+        }
+        let payload = self.with_vault_mut(|v| (v.trash_json(), v.workspace_json()));
+        if let Some((trash_json, ws_json)) = payload {
+            let _ = fs.write(TRASH_PATH, &trash_json, None).await;
+            let _ = fs.write(WORKSPACE_PATH, &ws_json, None).await;
+        }
+        let trashed = files;
+        self.open_tabs.update(|tabs| tabs.retain(|t| !trashed.contains(&t.path)));
+        if self
+            .active_tab
+            .get_untracked()
+            .map(|p| trashed.contains(&p))
+            .unwrap_or(false)
+        {
+            self.active_tab.set(None);
+            self.editor_path.set(None);
+        }
+        self.clear_selection();
+        self.rescan().await;
+        self.rebuild_link_index().await;
+        toast(format!("已把 {moved} 项移到回收站"));
+    }
+
+    /// 批量移动：整组落到同一个目录，逐项走 plan_move 处理重名。
+    pub async fn move_items(&self, paths: Vec<String>, target: String) {
+        let mut items: Vec<String> = paths
+            .into_iter()
+            .filter(|p| {
+                !p.is_empty()
+                    && *p != target
+                    && !target.starts_with(&format!("{p}/"))
+                    && dirname(p) != target
+            })
+            .collect();
+        items.sort();
+        items.dedup();
+        if items.is_empty() {
+            return;
+        }
+        self.commit_doc().await;
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
+        };
+        let mut done = 0usize;
+        for src in &items {
+            let plan = self.with_vault(|v| v.plan_move(src, &target));
+            let Some(Ok(Some((next, is_dir)))) = plan else {
+                continue;
+            };
+            if fs.rename(src, &next).await.is_err() {
+                continue;
+            }
+            self.with_vault_mut(|v| {
+                if is_dir {
+                    v.migrate_dir_prefix(src, &next)
+                } else {
+                    v.migrate_note_path(src, &next)
+                }
+            });
+            self.migrate_history(&fs, src, &next).await;
+            self.rewrite_open_prefix(src, &next);
+            done += 1;
+        }
+        if done == 0 {
+            toast("没有可移动的项目");
+            return;
+        }
+        let payload = self.with_vault_mut(|v| (v.index_json(), v.settings_json(), v.workspace_json()));
+        if let Some((index_json, settings_json, ws_json)) = payload {
+            let _ = fs.write(INDEX_PATH, &index_json, None).await;
+            let _ = fs.write(crate::vault::SETTINGS_PATH, &settings_json, None).await;
+            let _ = fs.write(WORKSPACE_PATH, &ws_json, None).await;
+        }
+        if !target.is_empty() {
+            self.expanded_dirs.update(|s| {
+                s.insert(target.clone());
+            });
+            self.persist_expanded();
+        }
+        self.clear_selection();
+        self.rescan().await;
+        self.rebuild_link_index().await;
+        toast(format!("已移动 {done} 项"));
+    }
+
+    /* ---------------- 本地版本快照 ---------------- */
+
+    /// 保存成功后写一份快照。节流 2 分钟 / 每篇最多 50 份，
+    /// 目标不是「每个字符都留档」，而是「手滑删掉半页能救回来」。
+    pub(crate) async fn snapshot_note(
+        &self,
+        fs: &VaultFs,
+        path: &str,
+        content: &str,
+        force: bool,
+    ) {
+        if content.trim().is_empty() {
+            return;
+        }
+        let versions = self
+            .history_manifest
+            .with_value(|m| m.get(path).cloned())
+            .unwrap_or_default();
+        let now = now_ms();
+        if !force {
+            if let Some(last) = versions.last() {
+                if now.saturating_sub(*last) < HISTORY_MIN_GAP_MS {
+                    return;
+                }
+            }
+        }
+        let dir = format!("{HISTORY_DIR}/{}", history_key(path));
+        if fs.mkdir(&dir).await.is_err() {
+            return;
+        }
+        let file = format!("{dir}/{now}.md");
+        if fs.write(&file, content, None).await.is_err() {
+            return;
+        }
+        let mut next = versions;
+        next.push(now);
+        next.sort_unstable();
+        while next.len() > HISTORY_KEEP {
+            let old = next.remove(0);
+            let _ = fs
+                .remove(&format!("{HISTORY_DIR}/{}/{old}.md", history_key(path)))
+                .await;
+        }
+        self.history_manifest
+            .update_value(|m| {
+                m.insert(path.to_string(), next);
+            });
+        self.persist_history_index(fs).await;
+    }
+
+    async fn persist_history_index(&self, fs: &VaultFs) {
+        if let Some(json) = self
+            .history_manifest
+            .with_value(|m| serde_json::to_string_pretty(m).ok())
+        {
+            let _ = fs.write(HISTORY_INDEX, &json, None).await;
+        }
+    }
+
+    /// 改名 / 移动后把历史目录与清单一起搬走，否则快照会变成孤儿。
+    async fn migrate_history(&self, fs: &VaultFs, from: &str, to: &str) {
+        let prefix = format!("{from}/");
+        let moved: Vec<(String, Vec<u64>)> = self
+            .history_manifest
+            .with_value(|m| {
+                m.iter()
+                    .filter(|(k, _)| *k == from || k.starts_with(&prefix))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<(String, Vec<u64>)>>()
+            });
+        if moved.is_empty() {
+            return;
+        }
+        for (old_path, versions) in moved {
+            let new_path = format!("{to}{}", &old_path[from.len()..]);
+            let _ = fs
+                .rename(
+                    &format!("{HISTORY_DIR}/{}", history_key(&old_path)),
+                    &format!("{HISTORY_DIR}/{}", history_key(&new_path)),
+                )
+                .await;
+            self.history_manifest.update_value(|m| {
+                m.remove(&old_path);
+                m.insert(new_path, versions);
+            });
+        }
+        self.persist_history_index(fs).await;
+    }
+
+    pub fn open_history(self, path: String) {
+        let versions: Vec<u64> = self
+            .history_manifest
+            .with_value(|m| m.get(&path).cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .collect();
+        if versions.is_empty() {
+            toast("这篇笔记还没有历史版本，保存一次后会生成");
+            return;
+        }
+        let title = self
+            .note_at(&path)
+            .map(|n| n.title)
+            .unwrap_or_else(|| basename(&path));
+        let first = versions[0];
+        self.history_dialog.set(Some(HistoryDialogState {
+            path,
+            title,
+            versions,
+            selected: Some(first),
+            preview: String::new(),
+            loading: true,
+        }));
+        spawn_local(async move {
+            state_load_history(self, first).await;
+        });
+    }
+
+    pub fn select_history_version(self, ts: u64) {
+        if let Some(dlg) = self.history_dialog.get_untracked() {
+            self.history_dialog.set(Some(HistoryDialogState {
+                selected: Some(ts),
+                loading: true,
+                preview: String::new(),
+                ..dlg
+            }));
+        }
+        spawn_local(async move {
+            state_load_history(self, ts).await;
+        });
+    }
+
+    pub async fn restore_history(self, ts: u64) {
+        let Some(dlg) = self.history_dialog.get_untracked() else {
+            return;
+        };
+        let Some(fs) = self.vault_fs() else {
+            toast("仓库未就绪");
+            return;
+        };
+        self.commit_doc().await;
+        let snap = format!("{HISTORY_DIR}/{}/{ts}.md", history_key(&dlg.path));
+        let text = match fs.read(&snap).await {
+            Ok(Some(t)) => t,
+            Ok(None) => {
+                toast("这个版本已经不在了");
+                return;
+            }
+            Err(err) => {
+                toast(err);
+                return;
+            }
+        };
+        // 恢复前把当前内容也存一份：恢复本身也可能是手滑
+        let current = fs.read(&dlg.path).await.ok().flatten().unwrap_or_default();
+        self.snapshot_note(&fs, &dlg.path, &current, true).await;
+        if let Err(err) = fs.write(&dlg.path, &text, None).await {
+            toast(format!("恢复失败：{err}"));
+            return;
+        }
+        let mtime = now_ms();
+        self.with_vault_mut(|v| v.mark_saved(&dlg.path, &text, mtime));
+        if self.editor_path.get_untracked().as_deref() == Some(dlg.path.as_str()) {
+            self.editor_content.set(text.clone());
+            self.saved_content.set(text);
+            self.save_status.set(SaveStatus::Saved);
+            self.mark_tab_dirty(&dlg.path, false);
+        }
+        self.history_dialog.set(None);
+        self.bump();
+        self.schedule_index_rebuild();
+        toast("已恢复到这个版本");
+    }
+
+    /// 读写的都是 `.inkdown/settings.json`，供移动后补写颜色映射用。
+    pub fn persist_settings(&self) {
+        let payload = self.with_vault(|v| (v.settings_json(), v.fs.clone()));
+        let Some((json, fs)) = payload else {
+            return;
+        };
+        spawn_local(async move {
+            let _ = fs.write(crate::vault::SETTINGS_PATH, &json, None).await;
+        });
+    }
+
     pub fn set_line_width(&self, theme: Theme, width: String) {
         self.line_width.set(width.clone());
         theme.set_token("--ink-line-w", line_width_css(&width));
@@ -1784,8 +2456,31 @@ impl AppState {
     }
 }
 
-fn line_width_css(width: &str) -> &'static str {
-    match width {
+/// 读某个快照的正文填进弹窗。单独成函数是为了不在持有仓库借用时 await。
+async fn state_load_history(state: AppState, ts: u64) {
+    let Some(dlg) = state.history_dialog.get_untracked() else {
+        return;
+    };
+    let Some(fs) = state.vault_fs() else {
+        return;
+    };
+    let snap = format!("{HISTORY_DIR}/{}/{ts}.md", history_key(&dlg.path));
+    let preview = match fs.read(&snap).await {
+        Ok(Some(text)) => text,
+        Ok(None) => "（这个版本已经不在了）".to_string(),
+        Err(err) => format!("（读取失败：{err}）"),
+    };
+    state.history_dialog.update(|slot| {
+        if let Some(d) = slot {
+            if d.path == dlg.path && d.selected == Some(ts) {
+                d.preview = preview;
+                d.loading = false;
+            }
+        }
+    });
+}
+
+fn line_width_css(width: &str) -> &'static str {    match width {
         "wide" => "920px",
         "full" => "100%",
         _ => "720px",

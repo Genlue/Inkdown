@@ -3,6 +3,7 @@
 use glass_design::prelude::*;
 use leptos::html;
 use leptos::prelude::*;
+use std::collections::HashMap;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
@@ -24,6 +25,14 @@ pub fn EditorWorkspace() -> impl IntoView {
     let editor_scroll_ref = NodeRef::<html::Div>::new();
     let preview_ref = NodeRef::<html::Article>::new();
     let preview_scroll_ref = NodeRef::<html::Div>::new();
+    let measure_ref = NodeRef::<html::Div>::new();
+    // 分屏滚动锚点：内容、宽度或字体变化后标脏，下一次滚动时重测
+    let anchors = StoredValue::new_local(None::<ScrollAnchors>);
+    let anchors_dirty = StoredValue::new_local(true);
+    // 程序滚动会触发对面的 scroll 事件。记下「我把它放到了哪里」，
+    // 下一次它落在这个位置就当我自己的回声吃掉；用户真滚动到别处不受影响。
+    let expect_ed = StoredValue::new_local(None::<(f64, f64)>);
+    let expect_pv = StoredValue::new_local(None::<(f64, f64)>);
     let image_input_ref = NodeRef::<html::Input>::new();
     let find_input_ref = NodeRef::<html::Input>::new();
 
@@ -65,8 +74,118 @@ pub fn EditorWorkspace() -> impl IntoView {
         let _ = state.editor_path.get();
         let _ = state.view_mode.get();
         let _ = state.editor_font_size.get();
+        // 布局要变了，旧的锚点不再可信
+        anchors_dirty.set_value(true);
         let resize = resize_editor;
         request_animation_frame(move || resize());
+    });
+
+    // 锚点只在需要时重测：内容、宽度、图片撑高都会让旧值失效
+    let ensure_anchors = Callback::new(move |_: ()| -> bool {
+        let (Some(ed), Some(ed_sc), Some(pv), Some(pv_sc), Some(mirror)) = (
+            editor_ref.get_untracked(),
+            editor_scroll_ref.get_untracked(),
+            preview_ref.get_untracked(),
+            preview_scroll_ref.get_untracked(),
+            measure_ref.get_untracked(),
+        ) else {
+            return false;
+        };
+        let stale = anchors_dirty.get_value()
+            || anchors
+                .with_value(|a| {
+                    a.as_ref()
+                        .map(|x| {
+                            // 宽度变了会重排，高度变了说明图片/字体把内容撑开过
+                            (x.ed_width - ed.client_width() as f64).abs() > 0.5
+                                || x.ed_height != ed.scroll_height()
+                                || x.pv_height != pv_sc.scroll_height()
+                        })
+                        .unwrap_or(true)
+                });
+        if stale {
+            let content = state.editor_content.get_untracked();
+            let built =
+                build_scroll_anchors(&ed, &ed_sc, pv.as_ref(), &pv_sc, mirror.as_ref(), &content);
+            anchors.set_value(built);
+            anchors_dirty.set_value(false);
+        }
+        anchors.with_value(|a| a.is_some())
+    });
+
+    // 分屏滚动同步：先落在「上一标题 → 下一标题」区间，再按区间内百分比换算。
+    // 程序滚动会立刻触发对面 scroll 事件，80ms 内的回灌直接忽略，避免两边互拖。
+    let sync_scroll = Callback::new(move |from_editor: bool| {
+        if state.view_mode.get_untracked() != "split" {
+            return;
+        }
+        let (Some(ed_sc), Some(pv_sc)) = (
+            editor_scroll_ref.get_untracked(),
+            preview_scroll_ref.get_untracked(),
+        ) else {
+            return;
+        };
+        let now = js_sys::Date::now();
+        let echo = |sc: &web_sys::Element, exp: &StoredValue<Option<(f64, f64)>, leptos::reactive::owner::LocalStorage>| {
+            exp.with_value(|v| {
+                v.map(|(t, ts)| {
+                    (sc.scroll_top() as f64 - t).abs() < 1.5 && now - ts < 500.0
+                })
+                .unwrap_or(false)
+            })
+        };
+        if from_editor {
+            if echo(&ed_sc, &expect_ed) {
+                return;
+            }
+        } else if echo(&pv_sc, &expect_pv) {
+            return;
+        }
+        if !ensure_anchors.run(()) {
+            return;
+        }
+
+        let Some(data) = anchors.get_value() else {
+            return;
+        };
+        if data.pairs.len() < 2 {
+            return;
+        }
+        let src_top = if from_editor {
+            ed_sc.scroll_top() as f64
+        } else {
+            pv_sc.scroll_top() as f64
+        };
+        let dst_max = if from_editor { data.pv_max } else { data.ed_max };
+        let pair_src = |p: &(usize, f64, f64)| if from_editor { p.1 } else { p.2 };
+        let pair_dst = |p: &(usize, f64, f64)| if from_editor { p.2 } else { p.1 };
+
+        let mut i = 0usize;
+        while i + 1 < data.pairs.len() && pair_src(&data.pairs[i + 1]) <= src_top + 0.5 {
+            i += 1;
+        }
+        let s0 = pair_src(&data.pairs[i]);
+        let d0 = pair_dst(&data.pairs[i]);
+        let (s1, d1) = if i + 1 < data.pairs.len() {
+            (pair_src(&data.pairs[i + 1]), pair_dst(&data.pairs[i + 1]))
+        } else {
+            (s0, d0)
+        };
+        let progress = if s1 - s0 > 1.0 {
+            ((src_top - s0) / (s1 - s0)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let target = (d0 + progress * (d1 - d0)).clamp(0.0, dst_max);
+        if from_editor {
+            if (pv_sc.scroll_top() as f64 - target).abs() > 0.5 {
+                expect_pv.set_value(Some((target, now)));
+                pv_sc.set_scroll_top(target as i32);
+            }
+        } else if (ed_sc.scroll_top() as f64 - target).abs() > 0.5 {
+            expect_ed.set_value(Some((target, now)));
+            ed_sc.set_scroll_top(target as i32);
+        }
     });
 
     // 聚焦查找框
@@ -165,7 +284,13 @@ pub fn EditorWorkspace() -> impl IntoView {
         let Some((line, _seq)) = state.jump_to_line_req.get() else {
             return;
         };
+        // 这次是程序定位，两侧各自的 scroll 事件都要当成回声
+        expect_ed.set_value(None);
+        expect_pv.set_value(None);
         let mode = state.view_mode.get_untracked();
+        if mode == "split" {
+            let _ = ensure_anchors.run(());
+        }
         if mode != "edit" {
             if let (Some(preview), Some(scroll)) =
                 (preview_ref.get_untracked(), preview_scroll_ref.get_untracked())
@@ -175,8 +300,12 @@ pub fn EditorWorkspace() -> impl IntoView {
                 {
                     let c_rect = scroll.get_bounding_client_rect();
                     let t_rect = target.get_bounding_client_rect();
-                    let next_top = (scroll.scroll_top() as f64) + (t_rect.top() - c_rect.top()) - 64.0;
-                    scroll.set_scroll_top(next_top.max(0.0) as i32);
+                    // 与编辑器侧用同一个偏移量，点大纲时两侧标题落在同一高度
+                    let next_top = (scroll.scroll_top() as f64) + (t_rect.top() - c_rect.top()) - 24.0;
+                    if (scroll.scroll_top() as f64 - next_top).abs() > 0.5 {
+                        expect_pv.set_value(Some((next_top.max(0.0), js_sys::Date::now())));
+                        scroll.set_scroll_top(next_top.max(0.0) as i32);
+                    }
                 }
             }
         }
@@ -185,22 +314,131 @@ pub fn EditorWorkspace() -> impl IntoView {
                 (editor_ref.get_untracked(), editor_scroll_ref.get_untracked())
             {
                 let text = ed.value();
-                let total_lines = text.lines().count().max(1);
-                let ratio = (line as f64) / (total_lines as f64);
-                let range = (scroll.scroll_height() - scroll.client_height()).max(0) as f64;
-                scroll.set_scroll_top((ratio * range).max(0.0) as i32);
+                // 锚点里已经有该标题的真实像素位置（与预览同一轮测量），
+                // 直接查表；按行数取比例在长文档里会差出半屏，正是分屏错位的来源。
+                let jump_y = anchors.with_value(|a| {
+                    a.as_ref().and_then(|x| {
+                        x.pairs
+                            .iter()
+                            .find(|(l, _, _)| *l == line)
+                            .map(|(_, ey, _)| *ey)
+                    })
+                });
+                if let Some(ey) = jump_y {
+                    let next_top = (ey - 24.0).max(0.0);
+                    if (scroll.scroll_top() as f64 - next_top).abs() > 0.5 {
+                        expect_ed.set_value(Some((next_top, js_sys::Date::now())));
+                        scroll.set_scroll_top(next_top as i32);
+                    }
+                } else {
+                    let total_lines = text.lines().count().max(1);
+                    let ratio = (line as f64) / (total_lines as f64);
+                    let range = (scroll.scroll_height() - scroll.client_height()).max(0) as f64;
+                    scroll.set_scroll_top((ratio * range).max(0.0) as i32);
+                }
                 if let Some(utf16_pos) = line_start_utf16(&text, line) {
                     let _ = ed.focus();
                     let _ = ed.set_selection_range(utf16_pos as u32, utf16_pos as u32);
                 }
+                // 再等一帧复核：分屏刚切到这个标题时，另一侧的回声同步可能
+                // 又把滚动拉走。按标题的实际像素位置纠一次，误差 > 4px 才动。
+                let ed_check = scroll.clone();
+                let pv_check = preview_ref.get_untracked();
+                let pv_scroll_check = preview_scroll_ref.get_untracked();
+                let sel = format!("[data-h=\"{line}\"]");
+                let sel_pv = format!("[data-line=\"{line}\"]");
+                request_animation_frame(move || {
+                    if let Some(mark) = measure_ref
+                        .get_untracked()
+                        .and_then(|m| m.query_selector(&sel).ok().flatten())
+                    {
+                        let c = ed_check.get_bounding_client_rect();
+                        let delta = (mark.get_bounding_client_rect().top() - c.top()) - 24.0;
+                        if delta.abs() > 4.0 {
+                            let next = (ed_check.scroll_top() as f64 + delta).max(0.0);
+                            expect_ed.set_value(Some((next, js_sys::Date::now())));
+                            ed_check.set_scroll_top(next as i32);
+                        }
+                    }
+                    if let (Some(pv), Some(pv_sc)) = (pv_check, pv_scroll_check) {
+                        if let Ok(Some(head)) = pv.query_selector(&sel_pv) {
+                            let c = pv_sc.get_bounding_client_rect();
+                            let delta = (head.get_bounding_client_rect().top() - c.top()) - 24.0;
+                            if delta.abs() > 4.0 {
+                                let next = (pv_sc.scroll_top() as f64 + delta).max(0.0);
+                                expect_pv.set_value(Some((next, js_sys::Date::now())));
+                                pv_sc.set_scroll_top(next as i32);
+                            }
+                        }
+                    }
+                });
             }
         }
     });
 
-    // 解析预览区里的本地仓库图片
-    let rendered_html = Memo::new(move |_| {
+    // 预览 HTML 走防抖：一次击键就重排整篇 Markdown 再替换 innerHTML，
+    // 长文档里每键 60–90ms 的长任务全出在这里（实测 split 下 10 键 12 次）。
+    // 停手 90ms 后再渲染；「仅编辑」模式直接不渲染；换文档则立刻渲染。
+    let rendered_html = RwSignal::new(String::new());
+    // 定时器句柄必须和闭包一起持有：clearTimeout 会让 once_into_js 的闭包永远
+    // 不被调用，Rust 侧那一份（连同捕获的整篇正文）就一直留在 wasm 堆里，
+    // 连续打字会按击键数累积。持有 Closure 才能随任务取消一起 drop。
+    let preview_job = StoredValue::new_local(None::<(
+        i32,
+        wasm_bindgen::closure::Closure<dyn FnMut()>,
+    )>);
+    let last_preview_path = StoredValue::new_local(String::new());
+    Effect::new(move |_| {
         let src = state.editor_content.get();
-        render_markdown(&src)
+        let mode = state.view_mode.get();
+        let path = state.editor_path.get_untracked().unwrap_or_default();
+        preview_job.with_value(|job| {
+            if let Some((id, _)) = job {
+                if let Some(w) = web_sys::window() {
+                    w.clear_timeout_with_handle(*id);
+                }
+            }
+        });
+        preview_job.set_value(None);
+        if mode == "edit" {
+            if !rendered_html.get_untracked().is_empty() {
+                rendered_html.set(String::new());
+            }
+            return;
+        }
+        let switched = last_preview_path.with_value(|p| *p != path);
+        if switched {
+            last_preview_path.set_value(path);
+        }
+        if switched {
+            rendered_html.set(render_markdown(&src));
+            return;
+        }
+        let target = rendered_html;
+        let cb: wasm_bindgen::closure::Closure<dyn FnMut()> =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+                target.set(render_markdown(&src));
+            }));
+        if let Some(w) = web_sys::window() {
+            if let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                90,
+            ) {
+                preview_job.set_value(Some((id, cb)));
+            }
+        }
+    });
+
+    // 只在「换文档 / 切视图 / 改字号」时预建一次锚点。
+    // 千万别盯着 editor_content：镜像要把整篇正文排一遍，跟着每次击键重建
+    // 会让长文档打字持续掉帧——内容变化只标脏，等滚动或跳转时再量。
+    Effect::new(move |_| {
+        let _ = state.editor_path.get();
+        let _ = state.view_mode.get();
+        let _ = state.editor_font_size.get();
+        request_animation_frame(move || {
+            let _ = ensure_anchors.run(());
+        });
     });
 
     Effect::new(move |_| {
@@ -808,17 +1046,7 @@ pub fn EditorWorkspace() -> impl IntoView {
                     node_ref=editor_scroll_ref
                     on:scroll=move |_| {
                         update_active_heading(false);
-                        // 分栏模式下按比例同步预览区滚动
-                        if state.view_mode.get_untracked() == "split" {
-                            if let (Some(ed_sc), Some(pv_sc)) =
-                                (editor_scroll_ref.get_untracked(), preview_scroll_ref.get_untracked())
-                            {
-                                let ed_range = (ed_sc.scroll_height() - ed_sc.client_height()).max(1) as f64;
-                                let pv_range = (pv_sc.scroll_height() - pv_sc.client_height()).max(0) as f64;
-                                let ratio = (ed_sc.scroll_top() as f64) / ed_range;
-                                pv_sc.set_scroll_top((ratio * pv_range) as i32);
-                            }
-                        }
+                        sync_scroll.run(true);
                     }
                     on:click=move |ev: web_sys::MouseEvent| {
                         if let (Some(scroll), Some(ed)) =
@@ -974,6 +1202,8 @@ pub fn EditorWorkspace() -> impl IntoView {
                             }
                         ></textarea>
                     </div>
+                    // 只用于测量标题位置，不参与绘制
+                    <div class="ink-measure" aria-hidden="true" node_ref=measure_ref></div>
                 </div>
 
                 // [[ 双链补全浮层
@@ -1013,12 +1243,16 @@ pub fn EditorWorkspace() -> impl IntoView {
                 <div
                     class="ink-preview-scroll"
                     node_ref=preview_scroll_ref
-                    on:scroll=move |_| update_active_heading(true)
+                    on:scroll=move |_| {
+                        update_active_heading(true);
+                        sync_scroll.run(false);
+                    }
                 >
                     <div class="ink-doc-inner">
                         {move || (state.view_mode.get() == "preview").then(|| doc_header())}
                         <article
                             class="md-body selectable"
+                            data-md-color=move || state.md_color.get()
                             node_ref=preview_ref
                             inner_html=move || rendered_html.get()
                             on:click=move |ev: web_sys::MouseEvent| {
@@ -1347,4 +1581,167 @@ fn replace_all_text(text: &str, query: &str, rep: &str, case_sensitive: bool) ->
         }
     }
     out
+}
+
+/* ---------------- 分屏滚动对齐 ---------------- */
+
+/// 分屏两侧的“标题锚点”：编辑器侧由隐藏镜像测出，预览侧直接读 `data-line`。
+/// 滚动同步按「落在哪两个标题之间 + 区间内百分比」换算，而不是按整页比例——
+/// 后者在图片、表格或长短段落不一致时会让同一标题错开一整屏。
+#[derive(Clone, Default)]
+struct ScrollAnchors {
+    /// (行号, 编辑器 Y, 预览 Y)；首尾两个是哨兵
+    pairs: Vec<(usize, f64, f64)>,
+    ed_max: f64,
+    pv_max: f64,
+    ed_width: f64,
+    ed_height: i32,
+    pv_height: i32,
+}
+
+fn esc_measure(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn build_scroll_anchors(
+    ed: &web_sys::HtmlTextAreaElement,
+    ed_sc: &web_sys::Element,
+    pv: &web_sys::Element,
+    pv_sc: &web_sys::Element,
+    mirror: &web_sys::HtmlElement,
+    content: &str,
+) -> Option<ScrollAnchors> {
+    let headings = extract_headings(content);
+    if headings.is_empty() {
+        return None;
+    }
+
+    // 预览侧：标题元素相对滚动内容顶部的 Y
+    let pv_box = pv_sc.get_bounding_client_rect();
+    let pv_scroll = pv_sc.scroll_top() as f64;
+    let mut pv_map: HashMap<usize, f64> = HashMap::new();
+    if let Ok(list) = pv.query_selector_all(
+        "h1[data-line],h2[data-line],h3[data-line],h4[data-line],h5[data-line],h6[data-line]",
+    ) {
+        for i in 0..list.length() {
+            let Some(node) = list
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let Some(line) = node
+                .get_attribute("data-line")
+                .and_then(|s| s.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let rect = node.get_bounding_client_rect();
+            pv_map.insert(line, rect.top() - pv_box.top() + pv_scroll);
+        }
+    }
+    if pv_map.is_empty() {
+        return None;
+    }
+
+    // 编辑器侧：用同字体、同宽度的隐藏镜像排一遍，标题行前插标记点再量高度
+    let ed_box = ed.get_bounding_client_rect();
+    let ed_sc_box = ed_sc.get_bounding_client_rect();
+    let ed_scroll = ed_sc.scroll_top() as f64;
+    let style = mirror.style();
+    if let Some(win) = web_sys::window() {
+        if let Ok(Some(cs)) = win.get_computed_style(ed) {
+            for prop in [
+                "font-family",
+                "font-size",
+                "font-weight",
+                "font-style",
+                "line-height",
+                "letter-spacing",
+                "word-spacing",
+                "text-indent",
+                "padding-top",
+                "padding-right",
+                "padding-bottom",
+                "padding-left",
+                "border-top-width",
+                "border-right-width",
+                "border-bottom-width",
+                "border-left-width",
+                "box-sizing",
+                "white-space",
+                "overflow-wrap",
+                "word-break",
+                "tab-size",
+                "text-align",
+            ] {
+                if let Ok(v) = cs.get_property_value(prop) {
+                    let _ = style.set_property(prop, &v);
+                }
+            }
+        }
+    }
+    let _ = style.set_property("width", &format!("{}px", ed.client_width()));
+    let _ = style.set_property(
+        "top",
+        &format!("{}px", ed_box.top() - ed_sc_box.top() + ed_scroll),
+    );
+    let _ = style.set_property("left", &format!("{}px", ed_box.left() - ed_sc_box.left()));
+
+    let heading_lines: std::collections::HashSet<usize> =
+        headings.iter().map(|h| h.line).collect();
+    let mut html = String::with_capacity(content.len() + headings.len() * 36);
+    for (idx, raw) in content.split('\n').enumerate() {
+        if heading_lines.contains(&idx) {
+            html.push_str(&format!("<span data-h=\"{idx}\"></span>"));
+        }
+        html.push_str(&esc_measure(raw));
+        html.push('\n');
+    }
+    mirror.set_inner_html(&html);
+
+    let mut ed_map: HashMap<usize, f64> = HashMap::new();
+    if let Ok(markers) = mirror.query_selector_all("[data-h]") {
+        for i in 0..markers.length() {
+            let Some(node) = markers
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let Some(line) = node
+                .get_attribute("data-h")
+                .and_then(|s| s.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            let rect = node.get_bounding_client_rect();
+            ed_map.insert(line, rect.top() - ed_sc_box.top() + ed_scroll);
+        }
+    }
+
+    let mut pairs: Vec<(usize, f64, f64)> = vec![(usize::MAX, 0.0, 0.0)];
+    for h in &headings {
+        if let (Some(&ey), Some(&py)) = (ed_map.get(&h.line), pv_map.get(&h.line)) {
+            if pairs.last().map(|(_, y, _)| ey > *y + 1.0).unwrap_or(true) {
+                pairs.push((h.line, ey, py));
+            }
+        }
+    }
+    let ed_max = (ed_sc.scroll_height() - ed_sc.client_height()).max(0) as f64;
+    let pv_max = (pv_sc.scroll_height() - pv_sc.client_height()).max(0) as f64;
+    if pairs.last().map(|(_, y, _)| ed_max > *y + 1.0).unwrap_or(true) {
+        pairs.push((usize::MAX, ed_max, pv_max));
+    }
+
+    Some(ScrollAnchors {
+        pairs,
+        ed_max,
+        pv_max,
+        ed_width: ed.client_width() as f64,
+        ed_height: ed.scroll_height(),
+        pv_height: pv_sc.scroll_height(),
+    })
 }

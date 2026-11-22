@@ -64,12 +64,50 @@
 
 .ink-inspector-wrap {
   flex: none;
-  width: 252px;
+  width: var(--insp-w, 252px);
   min-height: 0;
   height: 100%;
   padding-top: var(--toolbar-h);
   background: var(--surface-sunken);
   box-shadow: inset 0.5px 0 0 var(--line);
+}
+
+/* 拖拽分界面：6px 命中区贴在检查器左缘，悬停/拖动时才显强调色。
+   命中区比视觉线宽，是为了鼠标不用对像素。 */
+.ink-insp-grip {
+  flex: none;
+  align-self: stretch;
+  width: 6px;
+  margin-left: -3px;
+  margin-right: -3px;
+  cursor: col-resize;
+  position: relative;
+  z-index: 2;
+  touch-action: none;
+}
+
+.ink-insp-grip::after {
+  content: "";
+  position: absolute;
+  inset: 0 2px;
+  border-radius: var(--r-pill);
+  background: transparent;
+  transition: background-color var(--dur-1) var(--ease-out);
+}
+
+.ink-insp-grip:hover::after,
+.ink-insp-grip[data-drag="1"]::after {
+  background: var(--accent-ring);
+}
+
+/* 大纲：库里的行首图标位（13px + 4px）在本应用从不放图标，
+   白占 17px 让整列文字看起来缩进过深；这里收掉图标位并压紧层级步长。 */
+.ink-inspector-wrap .c-outline__lead {
+  display: none;
+}
+
+.ink-inspector-wrap .c-outline__item[data-level] {
+  padding-left: calc(var(--s-2) + var(--depth, 0) * 10px);
 }
 
 .ink-inspector-wrap .c-inspector {
@@ -95,24 +133,6 @@
 }
 
 /* ---------------- 左侧导航栏底部 ---------------- */
-
-.ink-foot {
-  display: flex;
-  align-items: center;
-  gap: var(--s-3);
-  padding: 0 var(--s-2);
-  font-size: var(--fs-11);
-  letter-spacing: var(--tracking-caption);
-  color: var(--text-secondary);
-}
-
-.ink-foot__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--r-pill);
-  background: var(--success);
-  flex: none;
-}
 
 /* ---------------- 中间文件列表栏 ---------------- */
 
@@ -299,16 +319,54 @@
   position: absolute;
   top: 2px;
   bottom: 4px;
-  left: calc(var(--tree-pad) + var(--tree-depth, 0) * var(--tree-step) + 5px);
+  /* 对齐父级折叠箭头的中心：--tree-pad + 深度 * 步长 + 半个箭头 */
+  left: calc(var(--tree-pad) + var(--tree-depth, 0) * var(--tree-step) + 6px);
   width: 1px;
-  background: var(--line-soft);
+  background: var(--line);
   pointer-events: none;
 }
 
-.ink-tree[data-indent="boxes"] .ink-tree__children {
-  margin-left: var(--s-2);
-  padding-left: var(--s-1);
-  border-left: 1px solid var(--line-soft);
+/* 简约框：每行画一段「├」——竖线贯穿整层，横线在行中线向右弯成圆角。
+   和「连续引导线」的区别靠三件事同时成立：颜色更深（line-strong）、
+   有横向折角、同级最后一个收成 └（竖线只到中线）。 */
+.ink-tree[data-indent="boxes"] .ink-tree__row {
+  position: relative;
+}
+
+.ink-tree[data-indent="boxes"] .ink-tree__children .ink-tree__row::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--tree-pad) + (var(--tree-depth, 1) - 1) * var(--tree-step) + 6px);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line-strong);
+  pointer-events: none;
+}
+
+.ink-tree[data-indent="boxes"] .ink-tree__children .ink-tree__row::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--tree-pad) + (var(--tree-depth, 1) - 1) * var(--tree-step) + 6px);
+  top: calc(50% - 6px);
+  width: calc(var(--tree-step) - 6px);
+  height: 6px;
+  border-left: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  border-bottom-left-radius: 4px;
+  pointer-events: none;
+}
+
+/* 同一层最后一项：竖线到中线就停，收成 └ */
+.ink-tree[data-indent="boxes"] .ink-tree__children > .ink-tree__branch:last-child > .ink-tree__row::before,
+.ink-tree[data-indent="boxes"] .ink-tree__children > .ink-tree__row:last-child::before {
+  bottom: 50%;
+}
+
+/* 文件行比目录行多让出折叠箭头的宽度，折角要跟着延长到文件图标，
+   否则横线停在半空，看着像断了一截。 */
+.ink-tree[data-indent="boxes"] .ink-tree__children .ink-tree__row[data-type="file"]::after {
+  width: calc(var(--tree-step) - 6px + var(--tree-mark));
 }
 
 .ink-tree__row {
@@ -394,6 +452,183 @@
   border-radius: var(--r-xs);
   background: var(--surface-control);
   color: var(--text-tertiary);
+}
+
+/* ---------------- 彩虹文件夹 ---------------- */
+
+/* 颜色来自目录节点算出的内联 --folder-color，这里只决定染在哪一层。 */
+.ink-tree__row[data-type="dir"] .ink-tree__icon {
+  color: var(--folder-color, var(--text-secondary));
+  transition: color var(--dur-2) var(--ease-out);
+}
+
+.ink-tree[data-color-style="text"] .ink-tree__row[data-type="dir"] .ink-tree__name {
+  color: var(--folder-color, var(--text-primary));
+}
+
+.ink-tree[data-color-style="text"] .ink-tree__row[data-type="dir"][data-selected="1"] .ink-tree__name {
+  color: var(--accent);
+}
+
+/* 色条挂在图标左侧而不是整行左缘：文件夹缩进到哪，条就跟到哪，
+   也不会和「简约框」的行内伪元素抢 ::before / ::after。 */
+.ink-tree[data-color-style="rail"] .ink-tree__row[data-type="dir"] .ink-tree__icon {
+  position: relative;
+}
+
+.ink-tree[data-color-style="rail"] .ink-tree__row[data-type="dir"] .ink-tree__icon::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 1px;
+  bottom: 1px;
+  width: 2px;
+  border-radius: var(--r-pill);
+  background: var(--folder-color, transparent);
+  pointer-events: none;
+}
+
+/* ---------------- 沉浸文件夹 ---------------- */
+
+.ink-tree__name {
+  transition: color var(--dur-2) var(--ease-out), background-color var(--dur-2) var(--ease-out);
+}
+
+/* 被盖住的名字变成一根色条：不透露字数，也不透露层级以外的信息。
+   这是「视觉遮挡」不是加密，注意这一点在设置文案里已经写明。 */
+.ink-tree[data-immersive="1"] .ink-tree__row[data-cover="1"] .ink-tree__name {
+  color: transparent;
+  background: var(--surface-control);
+  box-shadow: inset 0 0 0 1px var(--line-soft);
+  border-radius: var(--r-pill);
+  max-width: 58%;
+  min-width: 30px;
+  height: 9px;
+  align-self: center;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.ink-tree[data-immersive="1"] .ink-tree__row[data-cover="1"] .ink-tree__icon,
+.ink-tree[data-immersive="1"] .ink-tree__row[data-cover="1"] .ink-tree__chevron {
+  opacity: 0.35;
+}
+
+.ink-tree[data-immersive="1"] .ink-tree__row[data-cover="1"] .ink-tree__ext,
+.ink-tree[data-immersive="1"] .ink-tree__row[data-cover="1"] .ink-tree__star {
+  display: none;
+}
+
+/* ---------------- 多选与批量条 ---------------- */
+
+.ink-tree__row[data-multi="1"] {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-ring);
+}
+
+.ink-batch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  margin: var(--s-1) var(--s-4) 0;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-md);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.ink-batch .c-btn {
+  flex: none;
+}
+
+.ink-batch__count {
+  flex: none;
+  white-space: nowrap;
+  padding-left: var(--s-2);
+  font-size: var(--fs-11);
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------- 版本历史 ---------------- */
+
+.ink-history {
+  display: flex;
+  gap: var(--s-4);
+  min-height: 300px;
+  max-height: 54vh;
+}
+
+.ink-history__list {
+  flex: none;
+  width: 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow: auto;
+  padding-right: var(--s-2);
+  border-right: 1px solid var(--line);
+}
+
+.ink-history__item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  padding: 6px var(--s-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--fs-12);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ink-history__item:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.ink-history__item[data-selected="1"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ink-history__stamp {
+  margin-left: auto;
+  font-size: var(--fs-11);
+  color: var(--text-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+
+.ink-history__preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+}
+
+.ink-history__body {
+  margin: 0;
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ink-history__hint {
+  padding: var(--s-8) var(--s-5);
+  color: var(--text-tertiary);
+  font-size: var(--fs-12);
+  text-align: center;
 }
 
 /* ---------------- 搜索结果 / 收藏 / 回收站卡片 ---------------- */
@@ -582,6 +817,22 @@
   padding: var(--s-7) var(--s-9) 40vh;
 }
 
+/* 测量镜像要跟着滚动容器定位：它必须落在内容坐标系里量标题高度 */
+.ink-editor-scroll {
+  position: relative;
+}
+
+.ink-measure {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
 @container (max-width: 440px) {
   .ink-editor-scroll,
   .ink-preview-scroll {
@@ -760,12 +1011,68 @@
 
 /* ---------------- Markdown 排版 ---------------- */
 
+/* Markdown 配色遵循「一色一义」：
+   1) 标题只用用户强调色的浓度阶梯，层级越浅越浓 —— 颜色在这里编码「结构权重」，
+      不参与区分语义，切换到任何强调色都不会读错层级；
+   2) 语义色只给真的有语义的元素：可点击（链接）、标记（==高亮==）、完成（勾选）；
+   3) 其余（正文、代码、引用旁注）保持中性，避免整页变成调色板。
+   默认值 = 「关闭」档，所有变量都指向中性令牌。 */
 .md-body {
   color: var(--text-primary);
   font-family: var(--ink-font-md, var(--font-ui));
   font-size: var(--ink-editor-fs, 14px);
   line-height: 1.8;
   letter-spacing: var(--tracking-body);
+  --md-h1: var(--text-primary);
+  --md-h2: var(--text-primary);
+  --md-h3: var(--text-primary);
+  --md-h4: var(--text-primary);
+  --md-h5: var(--text-primary);
+  --md-h6: var(--text-secondary);
+  --md-strong: var(--text-primary);
+  --md-em: var(--text-primary);
+  --md-mark-bg: var(--surface-control);
+  --md-mark-fg: var(--text-primary);
+  --md-quote-bar: var(--accent-ring);
+  --md-quote-fg: var(--text-secondary);
+  --md-list-mark: var(--text-secondary);
+  --md-rule: var(--line-soft);
+  --md-th-bg: var(--surface-sunken);
+  --md-th-fg: var(--text-primary);
+}
+
+/* 克制：标题带一层薄色，结构看得出来，又不抢正文 */
+.md-body[data-md-color="soft"] {
+  --md-h1: color-mix(in srgb, var(--accent) 72%, var(--text-primary));
+  --md-h2: color-mix(in srgb, var(--accent) 52%, var(--text-primary));
+  --md-h3: color-mix(in srgb, var(--accent) 36%, var(--text-primary));
+  --md-h4: color-mix(in srgb, var(--accent) 22%, var(--text-primary));
+  --md-h5: color-mix(in srgb, var(--accent) 12%, var(--text-primary));
+  --md-h6: var(--text-secondary);
+  --md-em: var(--text-secondary);
+  --md-mark-bg: color-mix(in srgb, var(--warning) 16%, transparent);
+  --md-quote-bar: var(--accent);
+  --md-list-mark: color-mix(in srgb, var(--accent) 55%, var(--text-tertiary));
+  --md-rule: color-mix(in srgb, var(--accent) 22%, var(--line-soft));
+  --md-th-bg: color-mix(in srgb, var(--accent) 8%, var(--surface-sunken));
+}
+
+/* 鲜明：同一套逻辑推到上限，加粗/斜体/列表符号也进入强调色系 */
+.md-body[data-md-color="vivid"] {
+  --md-h1: var(--accent);
+  --md-h2: color-mix(in srgb, var(--accent) 82%, var(--text-primary));
+  --md-h3: color-mix(in srgb, var(--accent) 62%, var(--text-primary));
+  --md-h4: color-mix(in srgb, var(--accent) 44%, var(--text-primary));
+  --md-h5: color-mix(in srgb, var(--accent) 26%, var(--text-primary));
+  --md-h6: var(--text-tertiary);
+  --md-strong: color-mix(in srgb, var(--accent) 52%, var(--text-primary));
+  --md-em: color-mix(in srgb, var(--accent) 34%, var(--text-secondary));
+  --md-mark-bg: color-mix(in srgb, var(--warning) 26%, transparent);
+  --md-quote-bar: var(--accent);
+  --md-list-mark: var(--accent);
+  --md-rule: color-mix(in srgb, var(--accent) 34%, var(--line-soft));
+  --md-th-bg: color-mix(in srgb, var(--accent) 12%, var(--surface-sunken));
+  --md-th-fg: color-mix(in srgb, var(--accent) 60%, var(--text-primary));
 }
 
 .md-body:empty::before {
@@ -785,22 +1092,60 @@
   font-weight: 600;
   line-height: var(--lh-snug);
   letter-spacing: var(--tracking-title);
-  color: var(--text-primary);
 }
 
 .md-body h1 {
   margin-top: 4px;
   font-size: 26px;
+  color: var(--md-h1);
 }
 
 .md-body h2 {
   font-size: 20px;
+  color: var(--md-h2);
   padding-bottom: 6px;
-  border-bottom: 0.5px solid var(--line-soft);
+  border-bottom: 0.5px solid var(--md-rule);
 }
 
 .md-body h3 {
   font-size: 16px;
+  color: var(--md-h3);
+}
+
+.md-body h4 {
+  font-size: 14.5px;
+  color: var(--md-h4);
+}
+
+.md-body h5 {
+  font-size: 13.5px;
+  color: var(--md-h5);
+}
+
+.md-body h6 {
+  font-size: 12.5px;
+  color: var(--md-h6);
+  letter-spacing: var(--tracking-caption);
+}
+
+.md-body strong {
+  color: var(--md-strong);
+  font-weight: 650;
+}
+
+.md-body em {
+  color: var(--md-em);
+}
+
+.md-body del {
+  color: var(--text-quaternary);
+}
+
+.md-body mark {
+  padding: 0 3px;
+  border-radius: var(--r-xs);
+  background: var(--md-mark-bg);
+  color: var(--md-mark-fg);
 }
 
 .md-body p {
@@ -836,6 +1181,11 @@
   margin: 4px 0;
 }
 
+/* 列表符号只承担「结构」，跟随标题色系但不抢正文 */
+.md-body li::marker {
+  color: var(--md-list-mark);
+}
+
 .md-li-task {
   list-style: none;
   margin-left: -20px;
@@ -850,15 +1200,20 @@
 
 .md-task input {
   margin-top: 6px;
-  accent-color: var(--accent);
+  accent-color: var(--md-list-mark);
   cursor: pointer;
+}
+
+/* 勾选 = 完成，这里才该出现 success，而不是把绿色铺给普通正文 */
+.md-task input:checked {
+  accent-color: var(--success);
 }
 
 .md-body blockquote {
   margin: 16px 0;
   padding: 2px 0 2px var(--s-6);
-  border-left: 2.5px solid var(--accent-ring);
-  color: var(--text-secondary);
+  border-left: 2.5px solid var(--md-quote-bar);
+  color: var(--md-quote-fg);
 }
 
 .md-body hr {
@@ -951,7 +1306,8 @@
 }
 
 .md-body th {
-  background: var(--surface-sunken);
+  background: var(--md-th-bg);
+  color: var(--md-th-fg);
   font-weight: 600;
 }
 
@@ -1227,16 +1583,139 @@
   padding-bottom: var(--s-10);
 }
 
-/* GlassEffectsSetting 自带的标签与外层 Row 重复：Row 统一负责标签与提示，
-   这里只留下原生 select，让这一项与其它设置行左右对齐、字号一致。 */
-.ink-effects-setting .c-glass-effects-setting__label {
-  display: none;
-}
-
 .ink-shortcuts-body {
   display: flex;
   flex-direction: column;
   gap: var(--s-5);
   max-height: 55vh;
   overflow-y: auto;
+}
+
+/* ---------------- 启动进度屏 ---------------- */
+
+.ink-boot {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-sunken);
+  cursor: default;
+}
+
+.ink-boot__card {
+  width: 340px;
+  max-width: calc(100vw - var(--s-9));
+  padding: var(--s-7) var(--s-7) var(--s-6);
+  border-radius: var(--r-lg);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-card);
+}
+
+.ink-boot__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.ink-boot__mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.ink-boot__name {
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: var(--tracking-title);
+  color: var(--text-primary);
+}
+
+.ink-boot__caption {
+  margin-top: var(--s-2);
+  font-size: var(--fs-13);
+  color: var(--text-secondary);
+}
+
+.ink-boot__track {
+  margin-top: var(--s-6);
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: var(--surface-control);
+  overflow: hidden;
+}
+
+.ink-boot__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 220ms ease;
+}
+
+.ink-boot__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: var(--s-3);
+  font-size: var(--fs-11);
+  color: var(--text-secondary);
+}
+
+.ink-boot__pct {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.ink-boot__steps {
+  display: grid;
+  gap: var(--s-2);
+  margin: var(--s-5) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ink-boot__step {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  font-size: var(--fs-11);
+  color: var(--text-quaternary);
+}
+
+.ink-boot__step[data-done="1"] {
+  color: var(--text-secondary);
+}
+
+.ink-boot__step[data-active="1"] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ink-boot__step-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--line);
+}
+
+.ink-boot__step[data-done="1"] .ink-boot__step-dot {
+  background: var(--accent);
+}
+
+.ink-boot__step[data-active="1"] .ink-boot__step-dot {
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.ink-boot__note {
+  margin: var(--s-5) 0 0;
+  font-size: var(--fs-11);
+  line-height: 1.6;
+  color: var(--text-quaternary);
 }

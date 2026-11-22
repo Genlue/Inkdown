@@ -4,10 +4,12 @@ use glass_design::prelude::*;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::markdown::rel_time;
 use crate::state::{
     AppState, ConfirmDialogKind, ContextMenuKind, InputDialogKind, NavPage,
 };
 use crate::vault::fs::dirname;
+use crate::vault::FOLDER_PALETTE;
 
 #[component]
 pub fn AppDialogsAndMenus() -> impl IntoView {
@@ -147,7 +149,81 @@ pub fn AppDialogsAndMenus() -> impl IntoView {
             }
         }}
 
-        // 3. 快捷键速查弹窗
+        // 3. 版本历史弹窗
+        {move || {
+            let dlg = state.history_dialog.get();
+            let is_open = dlg.is_some();
+            let title = dlg
+                .as_ref()
+                .map(|d| format!("版本历史 · {}", d.title))
+                .unwrap_or_default();
+            let versions = dlg.as_ref().map(|d| d.versions.clone()).unwrap_or_default();
+            let selected = dlg.as_ref().and_then(|d| d.selected);
+            let preview = dlg.as_ref().map(|d| d.preview.clone()).unwrap_or_default();
+            let loading = dlg.as_ref().map(|d| d.loading).unwrap_or(false);
+            let can_restore = selected.is_some() && !preview.is_empty() && !loading;
+
+            view! {
+                <Dialog
+                    open=is_open
+                    title=title
+                    description="每次保存后留在 .inkdown/history 里的本地快照，不占笔记本体"
+                    width=680
+                    on_close=Callback::new(move |_| state.history_dialog.set(None))
+                    actions=ToChildren::to_children(move || view! {
+                        <Button
+                            label="关闭"
+                            variant=ButtonVariant::Plain
+                            on_click=Callback::new(move |_| state.history_dialog.set(None))
+                        />
+                        <Button
+                            label="恢复此版本"
+                            icon=IconName::ROTATE_CCW
+                            variant=ButtonVariant::Primary
+                            disabled=!can_restore
+                            on_click=Callback::new(move |_| {
+                                if let Some(ts) = selected {
+                                    spawn_local(async move {
+                                        state.restore_history(ts).await;
+                                    });
+                                }
+                            })
+                        />
+                    })
+                >
+                    <div class="ink-history">
+                        <div class="ink-history__list">
+                            {versions.into_iter().map(|ts| {
+                                let active = selected == Some(ts);
+                                view! {
+                                    <button
+                                        type="button"
+                                        class="ink-history__item"
+                                        data-selected=active.then_some("1")
+                                        on:click=move |_| state.select_history_version(ts)
+                                    >
+                                        <Icon name=IconName::CLOCK size=12 />
+                                        <span>{rel_time(ts)}</span>
+                                        <span class="ink-history__stamp">{utc_stamp(ts)}</span>
+                                    </button>
+                                }
+                            }).collect_view()}
+                        </div>
+                        <div class="ink-history__preview">
+                            {if loading {
+                                view! { <div class="ink-history__hint">"正在读取…"</div> }.into_any()
+                            } else if preview.is_empty() {
+                                view! { <div class="ink-history__hint">"选择左侧任一版本查看内容"</div> }.into_any()
+                            } else {
+                                view! { <pre class="ink-history__body">{preview}</pre> }.into_any()
+                            }}
+                        </div>
+                    </div>
+                </Dialog>
+            }
+        }}
+
+        // 4. 快捷键速查弹窗
         <Dialog
             open=Signal::derive(move || state.shortcuts_open.get())
             title="快捷键速查"
@@ -211,7 +287,12 @@ fn build_menu_items(state: AppState, kind: &ContextMenuKind) -> Vec<MenuItem> {
         ContextMenuKind::TreeFile {
             is_md, favorite, ..
         } => {
-            let mut items = vec![MenuItem::new("open", "打开").icon(IconName::FILE_TEXT)];
+            let mut items = vec![
+                MenuItem::new("open", "打开").icon(IconName::FILE_TEXT),
+                MenuItem::new("select", "批量选择")
+                    .icon(IconName::SQUARE_CHECK)
+                    .shortcut("可拖动整组"),
+            ];
             if *is_md {
                 items.push(
                     MenuItem::new("fav", if *favorite { "取消收藏" } else { "添加到收藏" })
@@ -223,6 +304,11 @@ fn build_menu_items(state: AppState, kind: &ContextMenuKind) -> Vec<MenuItem> {
                 );
                 items.push(MenuItem::new("dup", "创建副本").icon(IconName::COPY));
                 items.push(MenuItem::new("rename", "重命名").icon(IconName::SQUARE_PEN));
+                items.push(
+                    MenuItem::new("history", "版本历史…")
+                        .icon(IconName::ROTATE_CCW)
+                        .separator_before(),
+                );
             }
             if state.is_desktop {
                 items.push(
@@ -240,13 +326,30 @@ fn build_menu_items(state: AppState, kind: &ContextMenuKind) -> Vec<MenuItem> {
             );
             items
         }
-        ContextMenuKind::TreeDir { .. } => {
+        ContextMenuKind::TreeDir { path } => {
+            let current_key = state.folder_color_key(path);
+            let mut palette: Vec<MenuItem> = FOLDER_PALETTE
+                .iter()
+                .map(|(key, _)| {
+                    MenuItem::new(format!("color:{key}"), crate::vault::folder_color_label(key))
+                        .checked(current_key.as_deref() == Some(*key))
+                })
+                .collect();
+            palette.push(
+                MenuItem::new("color:auto", "跟随层级")
+                    .checked(current_key.is_none())
+                    .separator_before(),
+            );
             let mut items = vec![
                 MenuItem::new("new-note", "在此新建笔记").icon(IconName::PLUS),
                 MenuItem::new("new-folder", "在此新建子文件夹").icon(IconName::FOLDER_PLUS),
+                MenuItem::new("select", "批量选择").icon(IconName::SQUARE_CHECK),
                 MenuItem::new("rename", "重命名文件夹")
                     .icon(IconName::SQUARE_PEN)
                     .separator_before(),
+                MenuItem::new("folder-color", "文件夹颜色")
+                    .icon(IconName::PALETTE)
+                    .children(palette),
             ];
             if state.is_desktop {
                 items.push(
@@ -349,6 +452,7 @@ fn handle_menu_action(state: AppState, kind: &ContextMenuKind, id: &str) {
                 "open" => spawn_local(async move {
                     state.open_file(&p, true).await;
                 }),
+                "select" => state.enter_select_mode(&p),
                 "fav" => spawn_local(async move {
                     state.toggle_favorite(p).await;
                 }),
@@ -368,6 +472,7 @@ fn handle_menu_action(state: AppState, kind: &ContextMenuKind, id: &str) {
                 }
                 "reveal" => state.open_in_explorer(p),
                 "copy-path" => state.copy_vault_path(p),
+                "history" => state.open_history(p),
                 "trash" => spawn_local(async move {
                     state.trash_note(p).await;
                 }),
@@ -404,7 +509,16 @@ fn handle_menu_action(state: AppState, kind: &ContextMenuKind, id: &str) {
                         confirm_label: "重命名".to_string(),
                     }));
                 }
+                "select" => state.enter_select_mode(&p),
                 "reveal" => state.open_in_explorer(p),
+                other if other.starts_with("color:") => {
+                    let key = other.trim_start_matches("color:").to_string();
+                    if key == "auto" {
+                        state.set_folder_color(p, None);
+                    } else {
+                        state.set_folder_color(p, Some(key));
+                    }
+                }
                 "delete-dir" => state.confirm_dialog.set(Some(crate::state::ConfirmDialogState {
                     kind: ConfirmDialogKind::DeleteFolder { path: p.clone() },
                     title: format!("删除文件夹「{}」？", crate::vault::fs::basename(&p)),
@@ -493,4 +607,16 @@ fn handle_menu_action(state: AppState, kind: &ContextMenuKind, id: &str) {
             _ => {}
         },
     }
+}
+
+/// 快照的绝对时间戳（本地时区），跟"3 分钟前"并排显示。
+fn utc_stamp(ms: u64) -> String {
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms as f64));
+    format!(
+        "{:02}-{:02} {:02}:{:02}",
+        date.get_month() + 1,
+        date.get_date(),
+        date.get_hours(),
+        date.get_minutes()
+    )
 }

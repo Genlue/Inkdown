@@ -12,6 +12,7 @@ pub mod fs;
 pub mod links;
 pub mod seed;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,134 @@ pub const INDEX_PATH: &str = ".inkdown/index.json";
 pub const TRASH_PATH: &str = ".inkdown/trash.json";
 pub const TRASH_DIR: &str = ".trash";
 
+/* ---------------- 启动进度 ---------------- */
+
+/// 启动分阶段上报。桌面端整库扫描要走 IPC、建树要走内存，一堵就是几秒；
+/// 没有阶段反馈时用户看到的是「鼠标等待 + 画面不动」，和死机没区别。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootStage {
+    Locating,
+    Scanning,
+    Reading,
+    Building,
+    Restoring,
+    Ready,
+}
+
+impl BootStage {
+    /// 进度条下列出的步骤，不含完成态。
+    pub const ALL: [Self; 5] = [
+        Self::Locating,
+        Self::Scanning,
+        Self::Reading,
+        Self::Building,
+        Self::Restoring,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Locating => "定位知识库",
+            Self::Scanning => "扫描仓库文件",
+            Self::Reading => "读取设置与索引",
+            Self::Building => "整理文件树",
+            Self::Restoring => "恢复上次笔记",
+            Self::Ready => "准备就绪",
+        }
+    }
+
+    pub fn percent(self) -> u8 {
+        match self {
+            Self::Locating => 8,
+            Self::Scanning => 28,
+            Self::Reading => 48,
+            Self::Building => 70,
+            Self::Restoring => 88,
+            Self::Ready => 100,
+        }
+    }
+}
+
+thread_local! {
+    // 只在启动期挂上。加载链路很深（open_or_create → open_folder → load →
+    // refresh），给每个函数都加进度参数不划算；wasm 是单线程，用 thread_local
+    // 钩子把「上报」和业务逻辑解耦，非启动期就是个空操作。
+    static BOOT_REPORT: RefCell<Option<Box<dyn Fn(BootStage)>>> = const { RefCell::new(None) };
+}
+
+pub fn arm_boot_report(f: impl Fn(BootStage) + 'static) {
+    BOOT_REPORT.with(|slot| *slot.borrow_mut() = Some(Box::new(f)));
+}
+
+pub fn disarm_boot_report() {
+    BOOT_REPORT.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// 让出一帧：signal.set 同步改完 DOM，浏览器还要等 JS 栈空了才绘制。
+/// 用 setTimeout 而不是 requestAnimationFrame——窗口刚创建时可能尚不可见，
+/// rAF 会被挂起，启动流程就永远停在这一步。
+pub async fn yield_paint() {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(win) = web_sys::window() {
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 16);
+        } else {
+            let _ = resolve.call0(&wasm_bindgen::JsValue::UNDEFINED);
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+/// 上报阶段并保证它至少被绘制过一帧。非启动期钩子为空，直接空操作——
+/// refresh() 每次保存都会跑，不能给热路径加这 16ms。
+async fn report_stage(stage: BootStage) {
+    let active = BOOT_REPORT.with(|slot| {
+        if let Some(f) = slot.borrow().as_ref() {
+            f(stage);
+            true
+        } else {
+            false
+        }
+    });
+    if active {
+        yield_paint().await;
+    }
+}
+
+/// 文件夹色板：8 个色相，深浅主题共用。
+///
+/// 颜色属于「用户内容」而非界面设计，所以以数据形式写进行内 `--folder-color`，
+/// `inkdown-app.css` 依旧只消费 `var(--*)`，不出现字面色值。
+pub const FOLDER_PALETTE: [(&str, &str); 8] = [
+    ("blue", "#0a84ff"),
+    ("indigo", "#5e5ce6"),
+    ("purple", "#bf5af2"),
+    ("pink", "#ff375f"),
+    ("red", "#ff453a"),
+    ("orange", "#ff9f0a"),
+    ("green", "#30d158"),
+    ("teal", "#40c8e0"),
+];
+
+pub fn folder_color_hex(key: &str) -> Option<&'static str> {
+    FOLDER_PALETTE
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, hex)| *hex)
+}
+
+pub fn folder_color_label(key: &str) -> &'static str {
+    match key {
+        "blue" => "海蓝",
+        "indigo" => "靛青",
+        "purple" => "紫罗兰",
+        "pink" => "桃粉",
+        "red" => "朱红",
+        "orange" => "琥珀",
+        "green" => "苔绿",
+        "teal" => "青碧",
+        _ => "跟随层级",
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppearanceSettings {
     #[serde(default = "default_mode")]
@@ -40,6 +169,13 @@ pub struct AppearanceSettings {
     pub accent: String,
     #[serde(rename = "treeIndent", default = "default_tree_indent")]
     pub tree_indent: String,
+    #[serde(rename = "folderColorMode", default = "default_folder_color_mode")]
+    pub folder_color_mode: String,
+    #[serde(rename = "folderColorStyle", default = "default_folder_color_style")]
+    pub folder_color_style: String,
+    /// Markdown 预览的配色强度：off / soft / vivid。
+    #[serde(rename = "mdColor", default = "default_md_color")]
+    pub md_color: String,
     #[serde(default = "default_glass")]
     pub glass: f32,
 }
@@ -53,6 +189,15 @@ fn default_accent() -> String {
 fn default_tree_indent() -> String {
     "lines".to_string()
 }
+fn default_folder_color_mode() -> String {
+    "auto".to_string()
+}
+fn default_folder_color_style() -> String {
+    "icon".to_string()
+}
+fn default_md_color() -> String {
+    "soft".to_string()
+}
 fn default_glass() -> f32 {
     1.0
 }
@@ -63,6 +208,9 @@ impl Default for AppearanceSettings {
             mode: default_mode(),
             accent: default_accent(),
             tree_indent: default_tree_indent(),
+            folder_color_mode: default_folder_color_mode(),
+            folder_color_style: default_folder_color_style(),
+            md_color: default_md_color(),
             glass: default_glass(),
         }
     }
@@ -121,6 +269,10 @@ pub struct VaultSettings {
     pub fonts: FontSettings,
     #[serde(default)]
     pub editor: EditorSettings,
+    /// 手动指定的文件夹颜色：文件夹路径 → 色板 key（blue/purple/…）。
+    /// 只影响显示，文件夹本身仍是磁盘上普通的目录。
+    #[serde(rename = "folderColors", default)]
+    pub folder_colors: BTreeMap<String, String>,
 }
 
 fn default_v1() -> u32 {
@@ -134,6 +286,7 @@ impl Default for VaultSettings {
             appearance: AppearanceSettings::default(),
             fonts: FontSettings::default(),
             editor: EditorSettings::default(),
+            folder_colors: BTreeMap::new(),
         }
     }
 }
@@ -158,6 +311,9 @@ pub struct WorkspaceState {
     pub split: f64,
     #[serde(rename = "listRatio", default = "default_list_ratio")]
     pub list_ratio: f64,
+    /// 右侧检查器宽度（px）。拖拽分界面写入，重启后沿用。
+    #[serde(rename = "inspectorWidth", default = "default_inspector_width")]
+    pub inspector_width: f64,
     #[serde(rename = "navHidden", default)]
     pub nav_hidden: bool,
     #[serde(rename = "listHidden", default)]
@@ -170,6 +326,15 @@ pub struct WorkspaceState {
     pub open_tabs: Vec<String>,
     #[serde(rename = "fontSize", default = "default_font_size")]
     pub font_size: f32,
+    /// 沉浸文件夹：只让当前笔记所在的目录可读，其余目录名盖成色条。
+    #[serde(default)]
+    pub immersive: bool,
+    #[serde(rename = "immersiveKeepAncestors", default = "default_true")]
+    pub immersive_keep_ancestors: bool,
+    #[serde(rename = "immersiveKeepInside", default = "default_true")]
+    pub immersive_keep_inside: bool,
+    #[serde(rename = "immersiveCollapse", default = "default_true")]
+    pub immersive_collapse: bool,
 }
 
 fn default_sort() -> String {
@@ -187,6 +352,9 @@ fn default_split() -> f64 {
 fn default_list_ratio() -> f64 {
     0.24
 }
+fn default_inspector_width() -> f64 {
+    252.0
+}
 fn default_font_size() -> f32 {
     14.0
 }
@@ -203,12 +371,17 @@ impl Default for WorkspaceState {
             view: default_inspector_tab(),
             split: default_split(),
             list_ratio: default_list_ratio(),
+            inspector_width: default_inspector_width(),
             nav_hidden: false,
             list_hidden: false,
             recents_open: false,
             recents: Vec::new(),
             open_tabs: Vec::new(),
             font_size: default_font_size(),
+            immersive: false,
+            immersive_keep_ancestors: true,
+            immersive_keep_inside: true,
+            immersive_collapse: true,
         }
     }
 }
@@ -258,6 +431,8 @@ pub struct VaultTreeNode {
     pub ext: String,
     pub file_type: FileType,
     pub is_markdown: bool,
+    /// 目录色板算出来的十六进制颜色；文件恒为 None。
+    pub color: Option<String>,
     pub children: Vec<VaultTreeNode>,
 }
 
@@ -313,6 +488,7 @@ pub struct Vault {
 
 impl Vault {
     pub async fn open_or_create() -> Result<Self, String> {
+        report_stage(BootStage::Locating).await;
         if is_tauri() {
             if let Some(saved) = ls_get(FS_VAULT_KEY).filter(|s| !s.trim().is_empty()) {
                 if let Ok(v) = Self::open_folder(&saved).await {
@@ -350,6 +526,7 @@ impl Vault {
             path: &'a str,
         }
         let resolved: String = invoke("vault_open", &Arg { path }).await?;
+        report_stage(BootStage::Scanning).await;
         let fs = VaultFs::Tauri {
             root: resolved.clone(),
         };
@@ -376,11 +553,13 @@ impl Vault {
         };
 
         let mut vault = Self::empty(fs, meta);
-        let existed_entries = vault.fs.walk().await?;
-        let has_any_notes = existed_entries
+        // load() 里的 refresh() 已经把整库条目装进 entries，直接用它判断，
+        // 不必为了「有没有笔记」再整库扫一次——原来启动固定 walk 两遍。
+        vault.load().await?;
+        let has_any_notes = vault
+            .entries
             .iter()
             .any(|e| e.kind == "file" && !is_hidden(&e.path));
-        vault.load().await?;
         if !has_any_notes {
             vault.seed().await?;
             vault.refresh().await?;
@@ -462,6 +641,7 @@ impl Vault {
 
     pub async fn load(&mut self) -> Result<(), String> {
         self.ensure_structure().await?;
+        report_stage(BootStage::Reading).await;
         if let Some(raw) = self.fs.read(SETTINGS_PATH).await? {
             if let Ok(s) = serde_json::from_str(&raw) {
                 self.settings = s;
@@ -541,6 +721,7 @@ impl Vault {
 
     pub async fn refresh(&mut self) -> Result<(), String> {
         self.entries = self.fs.walk().await?;
+        report_stage(BootStage::Building).await;
         self.tree = self.build_tree();
         Ok(())
     }
@@ -566,19 +747,20 @@ impl Vault {
             }
         }
 
-        self.build_children("", &dirs_by_parent, &files_by_parent)
+        self.build_children("", 0, &dirs_by_parent, &files_by_parent)
     }
 
     fn build_children(
         &self,
         parent: &str,
+        depth: usize,
         dirs_by_parent: &HashMap<String, Vec<&FsEntry>>,
         files_by_parent: &HashMap<String, Vec<&FsEntry>>,
     ) -> Vec<VaultTreeNode> {
         let mut out = Vec::new();
         if let Some(dirs) = dirs_by_parent.get(parent) {
-            for d in dirs {
-                let children = self.build_children(&d.path, dirs_by_parent, files_by_parent);
+            for (idx, d) in dirs.iter().enumerate() {
+                let children = self.build_children(&d.path, depth + 1, dirs_by_parent, files_by_parent);
                 out.push(VaultTreeNode {
                     path: d.path.clone(),
                     name: basename(&d.path),
@@ -588,6 +770,7 @@ impl Vault {
                     ext: String::new(),
                     file_type: FileType::Other,
                     is_markdown: false,
+                    color: self.folder_color_for(&d.path, idx, depth),
                     children,
                 });
             }
@@ -614,12 +797,28 @@ impl Vault {
                     ext: get_file_ext(&f.path),
                     file_type: get_file_type(&f.path),
                     is_markdown: is_md,
+                    color: None,
                     children: Vec::new(),
                 });
             }
         }
         sort_nodes(&mut out, &self.sort, &self.index);
         out
+    }
+
+    /// 目录颜色：手动指定优先；否则按「同级序号 + 深度」在色板里轮转，
+    /// 这样同一层不会撞色，往下钻又换一档色相。
+    fn folder_color_for(&self, path: &str, idx: usize, depth: usize) -> Option<String> {
+        if let Some(key) = self.settings.folder_colors.get(path) {
+            if let Some(hex) = folder_color_hex(key) {
+                return Some(hex.to_string());
+            }
+        }
+        if self.settings.appearance.folder_color_mode != "auto" {
+            return None;
+        }
+        let n = FOLDER_PALETTE.len();
+        Some(FOLDER_PALETTE[(idx + depth * 3) % n].1.to_string())
     }
 
     pub fn note_at(&self, path: &str) -> Option<NoteInfo> {
@@ -847,6 +1046,10 @@ impl Vault {
         serde_json::to_string_pretty(&self.workspace).unwrap_or_default()
     }
 
+    pub fn settings_json(&self) -> String {
+        serde_json::to_string_pretty(&self.settings).unwrap_or_default()
+    }
+
     /// 单篇改名：索引、缓存、工作区里的旧路径一起搬走，返回 index.json。
     pub fn migrate_note_path(&mut self, from: &str, to: &str) -> String {
         if let Some(meta) = self.index.notes.remove(from) {
@@ -893,6 +1096,22 @@ impl Vault {
                 *p = format!("{to}{}", &p[from.len()..]);
             }
         };
+
+        // 文件夹颜色跟着目录走，否则改名/移动后整棵子树掉色
+        let moved_colors: Vec<(String, String)> = self
+            .settings
+            .folder_colors
+            .iter()
+            .filter(|(k, _)| *k == from || k.starts_with(&prefix))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in moved_colors {
+            self.settings.folder_colors.remove(&k);
+            self.settings
+                .folder_colors
+                .insert(format!("{to}{}", &k[from.len()..]), v);
+        }
+
         rewrite(&mut self.workspace.last_note);
         for p in &mut self.workspace.recents {
             rewrite(p);
@@ -911,6 +1130,9 @@ impl Vault {
             .notes
             .retain(|k, _| k != path && !k.starts_with(&prefix));
         self.cache
+            .retain(|k, _| k != path && !k.starts_with(&prefix));
+        self.settings
+            .folder_colors
             .retain(|k, _| k != path && !k.starts_with(&prefix));
         self.workspace
             .recents

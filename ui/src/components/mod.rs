@@ -1,3 +1,4 @@
+pub mod boot_screen;
 pub mod dialogs;
 pub mod editor_workspace;
 pub mod file_pane;

@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::components::icons::{ICON_CHEVRONS_UP_DOWN, ICON_CODE, ICON_TABLE};
+use crate::components::icons::{ICON_CHEVRONS_UP_DOWN, ICON_CODE, ICON_IMMERSIVE, ICON_TABLE};
 use crate::markdown::{plain_excerpt, rel_time};
 use crate::state::{
     AppState, ConfirmDialogKind, ConfirmDialogState, ContextMenuKind, ContextMenuState,
@@ -14,6 +14,72 @@ use crate::state::{
 };
 use crate::vault::fs::{dirname, FileType};
 use crate::vault::VaultTreeNode;
+
+/// 沉浸模式下的「可读范围」。树是递归渲染的，每行只问一句：
+/// 这个节点该不该被盖住。
+#[derive(Clone, Default)]
+struct CoverCtx {
+    on: bool,
+    focus: String,
+    keep_ancestors: bool,
+    keep_inside: bool,
+    active_file: Option<String>,
+}
+
+impl CoverCtx {
+    fn covered(&self, path: &str, is_dir: bool) -> bool {
+        if !self.on {
+            return false;
+        }
+        if !is_dir && self.active_file.as_deref() == Some(path) {
+            return false;
+        }
+        let parent = if is_dir {
+            path.to_string()
+        } else {
+            dirname(path)
+        };
+        if parent == self.focus {
+            return false;
+        }
+        if self.keep_inside && parent.starts_with(&format!("{}/", self.focus)) {
+            return false;
+        }
+        if self.keep_ancestors {
+            let mut cur = self.focus.clone();
+            while !cur.is_empty() {
+                if cur == parent {
+                    return false;
+                }
+                cur = dirname(&cur);
+            }
+        }
+        true
+    }
+}
+
+/// 屏幕上从上到下能看到的节点顺序，Shift 连选按它取区间。
+fn flatten_visible(
+    nodes: &[VaultTreeNode],
+    expanded: &std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    for node in nodes {
+        out.push(node.path.clone());
+        if node.is_dir && expanded.contains(&node.path) {
+            flatten_visible(&node.children, expanded, out);
+        }
+    }
+}
+
+fn collect_dirs(nodes: &[VaultTreeNode], out: &mut Vec<(String, String)>) {
+    for node in nodes {
+        if node.is_dir {
+            out.push((node.path.clone(), node.path.clone()));
+            collect_dirs(&node.children, out);
+        }
+    }
+}
 
 fn icon_for_file(ft: FileType) -> IconName {
     match ft {
@@ -163,6 +229,19 @@ pub fn FilePane() -> impl IntoView {
                     }}
                     <span class="l-push"></span>
                     <Show when=move || matches!(state.nav_page.get(), NavPage::Files) && state.search_query.get().is_empty()>
+                        {move || {
+                            let on = state.immersive.get();
+                            view! {
+                                <IconButton
+                                    icon=ICON_IMMERSIVE
+                                    label=if on { "退出沉浸文件夹" } else { "沉浸文件夹：只留当前目录" }
+                                    size=Size::Sm
+                                    toggle=true
+                                    active=on
+                                    on_click=Callback::new(move |_| state.toggle_immersive())
+                                />
+                            }
+                        }}
                         <IconButton
                             icon=ICON_CHEVRONS_UP_DOWN
                             label="全部折叠 / 全部展开"
@@ -204,6 +283,88 @@ pub fn FilePane() -> impl IntoView {
                     </Show>
                 </div>
             </div>
+
+            <Show when=move || state.select_mode.get() || !state.selection.get().is_empty()>
+                {move || {
+                    let mut paths: Vec<String> = state.selection.get().into_iter().collect();
+                    paths.sort();
+                    let count = paths.len();
+                    let count_label = if count == 0 {
+                        "点选文件或文件夹".to_string()
+                    } else {
+                        format!("已选 {count}")
+                    };
+                    let exit_label = if state.select_mode.get() {
+                        "退出批量选择"
+                    } else {
+                        "取消选择"
+                    };
+                    let for_move = paths.clone();
+                    let for_fav = paths.clone();
+                    let for_trash = paths.clone();
+                    let dirs = {
+                        let mut out = Vec::new();
+                        collect_dirs(&state.tree(), &mut out);
+                        out
+                    };
+                    let move_items: Vec<MenuItem> = if dirs.is_empty() {
+                        vec![MenuItem::new("__root", "仓库根目录").icon(IconName::HARD_DRIVE)]
+                    } else {
+                        let mut items = vec![MenuItem::new("__root", "仓库根目录").icon(IconName::HARD_DRIVE)];
+                        for (path, label) in dirs {
+                            items.push(MenuItem::new(path, label).icon(IconName::FOLDER));
+                        }
+                        items
+                    };
+                    view! {
+                        <div class="ink-batch">
+                            <span class="ink-batch__count">{count_label}</span>
+                            <span class="l-push"></span>
+                            <MenuButton
+                                icon=IconName::MOVE
+                                label="移动"
+                                class="c-btn--sm"
+                                items=move_items
+                                on_select=Callback::new(move |dst: String| {
+                                    let target = if dst == "__root" { String::new() } else { dst };
+                                    let picked = for_move.clone();
+                                    spawn_local(async move {
+                                        state.move_items(picked, target).await;
+                                    });
+                                })
+                            />
+                            <IconButton
+                                icon=IconName::STAR
+                                label="批量收藏"
+                                size=Size::Sm
+                                on_click=Callback::new(move |_| {
+                                    let picked = for_fav.clone();
+                                    spawn_local(async move {
+                                        state.batch_favorite(picked, true).await;
+                                    });
+                                })
+                            />
+                            <IconButton
+                                icon=IconName::TRASH
+                                label="批量移到回收站"
+                                size=Size::Sm
+                                on_click=Callback::new(move |_| {
+                                    let picked = for_trash.clone();
+                                    spawn_local(async move {
+                                        state.batch_trash(picked).await;
+                                    });
+                                })
+                            />
+                            <IconButton
+                                icon=IconName::X
+                                label=exit_label
+                                size=Size::Sm
+                                on_click=Callback::new(move |_| state.clear_selection())
+                            />
+                        </div>
+                    }
+                }}
+            </Show>
 
             <div
                 class="ink-list__scroll"
@@ -291,6 +452,20 @@ fn render_files_tree(
 ) -> AnyView {
     let tree = state.tree();
     let recents = state.recents();
+    let expanded = state.expanded_dirs.get();
+    let mut visible: Vec<String> = Vec::new();
+    flatten_visible(&tree, &expanded, &mut visible);
+    let visible = StoredValue::new_local(visible);
+
+    // 沉浸范围只算一次，递归渲染时每行查表
+    let focus = state.focus_dir();
+    let cover = CoverCtx {
+        on: state.immersive.get() && !focus.is_empty(),
+        focus,
+        keep_ancestors: state.immersive_keep_ancestors.get(),
+        keep_inside: state.immersive_keep_inside.get(),
+        active_file: state.active_tab.get(),
+    };
 
     view! {
         <div class="ink-files-body">
@@ -361,6 +536,8 @@ fn render_files_tree(
                         role="tree"
                         aria-label="仓库文件树"
                         data-indent=move || state.tree_indent.get()
+                        data-immersive=if cover.on { "1" } else { "0" }
+                        data-color-style=move || state.folder_color_style.get()
                         data-root-drop=move || (drop_target.get().as_deref() == Some("")).then_some("1")
                         on:dragover=move |ev: web_sys::DragEvent| {
                             if drag_src.get_untracked().is_some() {
@@ -379,17 +556,33 @@ fn render_files_tree(
                             if let Some(src) = drag_src.get_untracked() {
                                 drag_src.set(None);
                                 spawn_local(async move {
-                                    state.move_item(src, String::new()).await;
+                                    let picked = batch_payload(state, &src);
+                                    if picked.len() > 1 {
+                                        state.move_items(picked, String::new()).await;
+                                    } else {
+                                        state.move_item(src, String::new()).await;
+                                    }
                                 });
                             }
                         }
                     >
-                        {tree.into_iter().map(|node| render_tree_node(state, node, 0, drag_src, drop_target)).collect_view()}
+                        {tree.into_iter().map(|node| render_tree_node(state, node, 0, drag_src, drop_target, cover.clone(), visible)).collect_view()}
                     </div>
                 }.into_any()
             }}
         </div>
     }.into_any()
+}
+
+fn batch_payload(state: AppState, src: &str) -> Vec<String> {
+    let sel = state.selection.get_untracked();
+    if sel.len() > 1 && sel.contains(src) {
+        let mut picked: Vec<String> = sel.into_iter().collect();
+        picked.sort();
+        picked
+    } else {
+        vec![src.to_string()]
+    }
 }
 
 fn render_tree_node(
@@ -398,10 +591,13 @@ fn render_tree_node(
     depth: usize,
     drag_src: RwSignal<Option<String>>,
     drop_target: RwSignal<Option<String>>,
+    cover: CoverCtx,
+    visible: StoredValue<Vec<String>, leptos::reactive::owner::LocalStorage>,
 ) -> AnyView {
     if node.is_dir {
         let path = node.path.clone();
         let path_click = path.clone();
+        let path_shift = path.clone();
         let path_ctx = path.clone();
         let path_drag = path.clone();
         let path_over = path.clone();
@@ -409,9 +605,16 @@ fn render_tree_node(
         let path_drop = path.clone();
         let path_drop_style = path.clone();
         let path_open = path.clone();
+        let path_chev = path.clone();
         let path_children = path.clone();
         let children = node.children;
         let name = node.name;
+        let style = match node.color.as_deref() {
+            Some(hex) => format!("--tree-depth:{depth};--folder-color:{hex}"),
+            None => format!("--tree-depth:{depth}"),
+        };
+        let covered = cover.covered(&path, true);
+        let cover_for_children = cover.clone();
 
         return view! {
             <div class="ink-tree__branch" style=format!("--tree-depth:{depth}")>
@@ -421,9 +624,32 @@ fn render_tree_node(
                     draggable="true"
                     data-type="dir"
                     data-path=path.clone()
+                    data-cover=if covered { "1" } else { "0" }
                     data-drop=move || (drop_target.get().as_deref() == Some(path_drop_style.as_str())).then_some("1")
-                    style=format!("--tree-depth:{depth}")
-                    on:click=move |_| state.toggle_dir(&path_click)
+                    style=style
+                    on:click=move |ev: web_sys::MouseEvent| {
+                        // Ctrl / Cmd 加选、Shift 连选；其余保持「点一下展开」
+                        if ev.ctrl_key() || ev.meta_key() {
+                            ev.prevent_default();
+                            state.toggle_selection(&path_click);
+                            return;
+                        }
+                        if ev.shift_key() {
+                            ev.prevent_default();
+                            let order = visible.get_value();
+                            state.select_range(&path_shift, &order);
+                            return;
+                        }
+                        // 批量选择模式：不用按修饰键，单击即勾选
+                        if state.select_mode.get_untracked() {
+                            state.toggle_selection(&path_click);
+                            return;
+                        }
+                        if !state.selection.get_untracked().is_empty() {
+                            state.clear_selection();
+                        }
+                        state.toggle_dir(&path_click);
+                    }
                     on:contextmenu=move |ev: web_sys::MouseEvent| {
                         ev.prevent_default();
                         ev.stop_propagation();
@@ -443,7 +669,11 @@ fn render_tree_node(
                     }
                     on:dragover=move |ev: web_sys::DragEvent| {
                         if let Some(src) = drag_src.get_untracked() {
-                            if src != path_over && !path_over.starts_with(&format!("{src}/")) {
+                            let picked = batch_payload(state, &src);
+                            let blocked = picked.iter().any(|p| {
+                                p == &path_over || path_over.starts_with(&format!("{p}/"))
+                            });
+                            if !blocked {
                                 ev.prevent_default();
                                 ev.stop_propagation();
                                 drop_target.set(Some(path_over.clone()));
@@ -463,18 +693,31 @@ fn render_tree_node(
                             drag_src.set(None);
                             let dst = path_drop.clone();
                             spawn_local(async move {
-                                state.move_item(src, dst).await;
+                                let picked = batch_payload(state, &src);
+                                if picked.len() > 1 {
+                                    state.move_items(picked, dst).await;
+                                } else {
+                                    state.move_item(src, dst).await;
+                                }
                             });
                         }
                     }
                 >
-                    <span class=move || {
-                        if state.expanded_dirs.get().contains(&path_open) {
-                            "ink-tree__chevron is-open"
-                        } else {
-                            "ink-tree__chevron"
+                    <span
+                        class=move || {
+                            if state.expanded_dirs.get().contains(&path_open) {
+                                "ink-tree__chevron is-open"
+                            } else {
+                                "ink-tree__chevron"
+                            }
                         }
-                    }>
+                        // 批量选择模式下整行是「勾选」，折叠交给箭头单独处理，
+                        // 否则进不了折叠目录。
+                        on:click=move |ev: web_sys::MouseEvent| {
+                            ev.stop_propagation();
+                            state.toggle_dir(&path_chev);
+                        }
+                    >
                         <Icon name=IconName::CHEVRON_RIGHT size=11 />
                     </span>
                     <span class="ink-tree__icon">
@@ -487,7 +730,7 @@ fn render_tree_node(
                         {children
                             .iter()
                             .cloned()
-                            .map(|child| render_tree_node(state, child, depth + 1, drag_src, drop_target))
+                            .map(|child| render_tree_node(state, child, depth + 1, drag_src, drop_target, cover_for_children.clone(), visible))
                             .collect_view()}
                     </div>
                 </Show>
@@ -498,7 +741,9 @@ fn render_tree_node(
 
     let path = node.path.clone();
     let path_sel = path.clone();
+    let path_multi = path.clone();
     let path_click = path.clone();
+    let path_shift = path.clone();
     let path_dbl = path.clone();
     let path_ctx = path.clone();
     let path_drag = path.clone();
@@ -506,6 +751,7 @@ fn render_tree_node(
     let favorite = node.favorite;
     let name = node.name.clone();
     let badge = (!is_md && !node.ext.is_empty()).then(|| node.ext.to_uppercase());
+    let covered = cover.covered(&path, false);
 
     view! {
         <div
@@ -514,16 +760,45 @@ fn render_tree_node(
             draggable="true"
             data-type="file"
             data-path=path
-            data-selected=move || (state.active_tab.get().as_deref() == Some(path_sel.as_str())).then_some("1")
+            data-cover=if covered { "1" } else { "0" }
+            data-selected=move || {
+                let picked = state.selection.get();
+                (state.active_tab.get().as_deref() == Some(path_sel.as_str()) || picked.contains(&path_sel))
+                    .then_some("1")
+            }
+            data-multi=move || {
+                let picked = state.selection.get();
+                (picked.contains(&path_multi)
+                    && state.active_tab.get().as_deref() != Some(path_multi.as_str()))
+                    .then_some("1")
+            }
             style=format!("--tree-depth:{depth}")
-            on:click=move |_| {
+            on:click=move |ev: web_sys::MouseEvent| {
+                if ev.ctrl_key() || ev.meta_key() {
+                    ev.prevent_default();
+                    state.toggle_selection(&path_click);
+                    return;
+                }
+                if ev.shift_key() {
+                    ev.prevent_default();
+                    let order = visible.get_value();
+                    state.select_range(&path_shift, &order);
+                    return;
+                }
+                if state.select_mode.get_untracked() {
+                    state.toggle_selection(&path_click);
+                    return;
+                }
+                if !state.selection.get_untracked().is_empty() {
+                    state.clear_selection();
+                }
                 let p = path_click.clone();
                 spawn_local(async move {
                     state.open_file(&p, true).await;
                 });
             }
             on:dblclick=move |_| {
-                if is_md {
+                if is_md && !state.select_mode.get_untracked() {
                     let cur_title = state.note_at(&path_dbl).map(|n| n.title).unwrap_or_default();
                     state.input_dialog.set(Some(InputDialogState {
                         kind: InputDialogKind::RenameNote { path: path_dbl.clone() },

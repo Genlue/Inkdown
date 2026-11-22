@@ -113,6 +113,20 @@ pub fn AppToolbar() -> impl IntoView {
                         });
                     })
                 />
+                <Capsule class="c-capsule--circle">
+                    {move || {
+                        let list_open = !state.list_hidden.get();
+                        view! {
+                            <IconButton
+                                icon=IconName::LIST
+                                label=if list_open { "收起文件列表 (Ctrl+Shift+B)" } else { "展开文件列表 (Ctrl+Shift+B)" }
+                                toggle=true
+                                active=list_open
+                                on_click=Callback::new(move |_| state.toggle_list())
+                            />
+                        }
+                    }}
+                </Capsule>
                 <Capsule class="ink-crumb-capsule">
                     // 胶囊外壳自带 data-tauri-drag-region="false"，会把整条面包屑
                     // 变成拖动死区；在内容层重新声明 deep，让空白与标题仍能拖窗，
@@ -155,27 +169,17 @@ pub fn AppToolbar() -> impl IntoView {
                     />
                 </Capsule>
 
-                <Capsule>
+                <Capsule class="c-capsule--circle">
                     {move || {
-                        let list_open = !state.list_hidden.get();
                         let insp_open = !state.inspector_hidden.get();
                         view! {
-                            <div class="l-row l-row--0">
-                                <IconButton
-                                    icon=IconName::LIST
-                                    label=if list_open { "收起文件列表 (Ctrl+Shift+B)" } else { "展开文件列表 (Ctrl+Shift+B)" }
-                                    toggle=true
-                                    active=list_open
-                                    on_click=Callback::new(move |_| state.toggle_list())
-                                />
-                                <IconButton
-                                    icon=IconName::PANEL_RIGHT
-                                    label=if insp_open { "收起右侧检查器 (Ctrl+Shift+E)" } else { "展开右侧检查器 (Ctrl+Shift+E)" }
-                                    toggle=true
-                                    active=insp_open
-                                    on_click=Callback::new(move |_| state.toggle_inspector())
-                                />
-                            </div>
+                            <IconButton
+                                icon=IconName::PANEL_RIGHT
+                                label=if insp_open { "收起右侧检查器 (Ctrl+Shift+E)" } else { "展开右侧检查器 (Ctrl+Shift+E)" }
+                                toggle=true
+                                active=insp_open
+                                on_click=Callback::new(move |_| state.toggle_inspector())
+                            />
                         }
                     }}
                 </Capsule>

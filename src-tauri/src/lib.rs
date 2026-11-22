@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
 /// 当前仓库的根目录。所有文件命令都只接受相对路径。
 struct VaultRoot(Mutex<Option<PathBuf>>);
@@ -90,6 +90,12 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Entry>, depth: usize) -> Result<(
             .replace('\\', "/");
 
         if meta.is_dir() {
+            // 前端 is_hidden() 会过滤任何以 . 开头的路径段，这些目录永远不会进
+            // 文件树；递归进去只会让 .git / .inkdown/history / .trash 拖慢启动。
+            // 跳过它们与前端可见结果完全一致，但大仓库能少走几个数量级的目录。
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             out.push(Entry {
                 path: rel,
                 kind: "dir".into(),
@@ -322,7 +328,6 @@ fn vault_open(
     app: AppHandle,
     path: String,
     state: State<'_, VaultRoot>,
-    watch: State<'_, FsWatch>,
 ) -> Result<String, String> {
     let root = PathBuf::from(&path);
     if !root.is_dir() {
@@ -334,20 +339,34 @@ fn vault_open(
         .lock()
         .map_err(|_| "仓库状态损坏".to_string())? = Some(root.clone());
 
-    // 监听失败只写日志：仓库还能正常打开，前端可以用手动刷新兜底
-    if let Err(err) = start_watch(&app, &watch, &root) {
-        eprintln!("[watch] {err}");
-    }
+    // 递归注册监听要遍历仓库里每一个子目录，大仓库能占住主线程好几秒，
+    // 窗口消息循环一停，鼠标就变等待、界面画不出来。监听失败本来也只是记
+    // 日志不阻断打开，放到后台线程完全等价。
+    let app_bg = app.clone();
+    let root_bg = root.clone();
+    std::thread::spawn(move || {
+        let watch = app_bg.state::<FsWatch>();
+        if let Err(err) = start_watch(&app_bg, &watch, &root_bg) {
+            eprintln!("[watch] {err}");
+        }
+    });
 
     Ok(root.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-fn vault_walk(state: State<'_, VaultRoot>) -> Result<Vec<Entry>, String> {
+async fn vault_walk(state: State<'_, VaultRoot>) -> Result<Vec<Entry>, String> {
+    // 同步 command 跑在窗口主线程：整库递归一堵，WebView2 连加载进度都绘不出来。
+    // 改成 async + spawn_blocking，遍历归线程池，主线程始终能处理消息与绘制。
     let root = root_of(&state)?;
-    let mut out = Vec::new();
-    walk(&root, &root, &mut out, 0)?;
-    Ok(out)
+    let joined = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Entry>, String> {
+        let mut out = Vec::new();
+        walk(&root, &root, &mut out, 0)?;
+        Ok(out)
+    })
+    .await
+    .map_err(|err| err.to_string())?;
+    joined
 }
 
 #[tauri::command]
@@ -529,7 +548,14 @@ fn vault_exists(rel: String, state: State<'_, VaultRoot>) -> Result<bool, String
 /* ---------------- 系统与窗口 ---------------- */
 
 #[tauri::command]
-fn system_fonts() -> Vec<String> {
+async fn system_fonts() -> Vec<String> {
+    // Windows 上要起一个 `reg query` 子进程，同步跑同样会冻住窗口主线程
+    tauri::async_runtime::spawn_blocking(collect_system_fonts)
+        .await
+        .unwrap_or_default()
+}
+
+fn collect_system_fonts() -> Vec<String> {
     let mut families = BTreeSet::new();
 
     #[cfg(target_os = "windows")]
