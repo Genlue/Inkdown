@@ -35,6 +35,10 @@ pub fn start() {
     std::panic::set_hook(Box::new(|info| {
         web_sys::console::error_1(&format!("[inkdown panic] {info}").into());
     }));
+    // Inkdown 走的是手写挂载链（不是 bootstrap/GlassApp），库不会替我们恢复
+    // 「玻璃效果」档位；漏了这一步，用户选的「性能优先」每次重启都会回到完整效果。
+    // 顺序与库内一致：档位先落到 <html>，再注入样式，第一帧就是用户要的那档。
+    glass_design::restore_effects_preference();
     glass_design::install();
     leptos::mount::mount_to_body(App);
 }

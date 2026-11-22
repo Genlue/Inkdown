@@ -1629,8 +1629,8 @@ dependencies = [
 
 [[package]]
 name = "glass-design"
-version = "0.9.0"
-source = "git+https://github.com/Genlue/GlassDesign?tag=v0.9.0#e50904c921f066df698871c31f1ddb3a1a823328"
+version = "0.10.1"
+source = "git+https://github.com/Genlue/GlassDesign?tag=v0.10.1#e8acea592e17fccef38fbcf56dcdfc968eeb5e88"
 dependencies = [
  "js-sys",
  "leptos",
@@ -1641,7 +1641,7 @@ dependencies = [
 [[package]]
 name = "glass-design-host"
 version = "0.9.0"
-source = "git+https://github.com/Genlue/GlassDesign?tag=v0.9.0#e50904c921f066df698871c31f1ddb3a1a823328"
+source = "git+https://github.com/Genlue/GlassDesign?tag=v0.10.1#e8acea592e17fccef38fbcf56dcdfc968eeb5e88"
 dependencies = [
  "tauri",
 ]
@@ -2147,7 +2147,7 @@ dependencies = [
 
 [[package]]
 name = "inkdown"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "glass-design-host",
  "notify",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "inkdown-ui"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "glass-design",
  "js-sys",

@@ -1,6 +1,6 @@
 [package]
 name = "inkdown-ui"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 rust-version = "1.88"
 description = "Inkdown UI · Leptos CSR + GlassDesign"
@@ -9,7 +9,7 @@ description = "Inkdown UI · Leptos CSR + GlassDesign"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-glass-design = { git = "https://github.com/Genlue/GlassDesign", tag = "v0.9.0" }
+glass-design = { git = "https://github.com/Genlue/GlassDesign", tag = "v0.10.1" }
 leptos = { version = "0.8", features = ["csr"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

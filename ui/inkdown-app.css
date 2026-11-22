@@ -1268,6 +1268,12 @@
   padding-bottom: var(--s-10);
 }
 
+/* GlassEffectsSetting 自带的标签与外层 Row 重复：Row 统一负责标签与提示，
+   这里只留下原生 select，让这一项与其它设置行左右对齐、字号一致。 */
+.ink-effects-setting .c-glass-effects-setting__label {
+  display: none;
+}
+
 .ink-shortcuts-body {
   display: flex;
   flex-direction: column;

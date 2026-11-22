@@ -17,6 +17,7 @@
 
 - **禁止自造颜色**：`ui/inkdown-app.css` 里不写 `#hex` / `rgb()` / `hsl()`，只消费 `var(--*)` 令牌。
 - **优先使用 `glass_design::prelude::*` 组件**：布局用 `AppShell` / `Toolbar` / `NavColumn` / `Main` / `ScrollArea` / `Page` / `Pad` / `Stack` / `Cluster` / `Center` / `SplitView`；浮层统一走 `Dialog` / `Menu` / `MenuButton` / `toast`。
+- **自造磨砂面必须跟随性能档**：库只管自己的 `.c-*` 材质；若将来给侧栏、自定义顶栏等写 `backdrop-filter`，要同时写 `:root[data-gd-effects="solid"]` 下的不透明降级，否则「性能优先」只生效一半。
 - **不引入 AI 功能或外部网络请求**：保持纯正、轻快的本地 Markdown 知识库体验。
 
 ### 2. 版本号只动第三位

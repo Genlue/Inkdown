@@ -1,7 +1,7 @@
 {
   "name": "inkdown",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "Inkdown · 本地优先的 Markdown 笔记应用",
   "scripts": {

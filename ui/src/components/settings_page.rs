@@ -168,6 +168,15 @@ pub fn SettingsPage() -> impl IntoView {
                                         />
                                     </Row>
                                     <Divider />
+                                    <Row
+                                        label="玻璃效果"
+                                        hint="低配设备可关掉折射与模糊；选择即时生效并记住，刷新后由库恢复"
+                                    >
+                                        <div class="ink-effects-setting">
+                                            <GlassEffectsSetting />
+                                        </div>
+                                    </Row>
+                                    <Divider />
                                     <Row label="玻璃浓淡 (--lg)" hint="0 = 通透折射，1 = 高对比饱和磨砂" wide=true>
                                         <Slider
                                             value=Signal::derive(move || state.glass_level.get() as f64)
