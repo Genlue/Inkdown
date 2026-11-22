@@ -1,6 +1,6 @@
 [package]
 name = "inkdown-ui"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 rust-version = "1.88"
 description = "Inkdown UI · Leptos CSR + GlassDesign"

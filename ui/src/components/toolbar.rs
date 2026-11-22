@@ -113,21 +113,26 @@ pub fn AppToolbar() -> impl IntoView {
                         });
                     })
                 />
-                <div class="ink-crumbs-wrap">
-                    {move || view! {
-                        <Breadcrumb
-                            items=crumbs()
-                            on_pick=Callback::new(move |idx: usize| {
-                                if idx == 0 {
-                                    state.nav_page.set(NavPage::Files);
-                                    if state.list_hidden.get_untracked() {
-                                        state.toggle_list();
+                <Capsule class="ink-crumb-capsule">
+                    // 胶囊外壳自带 data-tauri-drag-region="false"，会把整条面包屑
+                    // 变成拖动死区；在内容层重新声明 deep，让空白与标题仍能拖窗，
+                    // 面包屑按钮仍按「可点击元素」优先拦下点击。
+                    <div class="ink-crumbs-wrap" data-tauri-drag-region="deep">
+                        {move || view! {
+                            <Breadcrumb
+                                items=crumbs()
+                                on_pick=Callback::new(move |idx: usize| {
+                                    if idx == 0 {
+                                        state.nav_page.set(NavPage::Files);
+                                        if state.list_hidden.get_untracked() {
+                                            state.toggle_list();
+                                        }
                                     }
-                                }
-                            })
-                        />
-                    }}
-                </div>
+                                })
+                            />
+                        }}
+                    </div>
+                </Capsule>
             </ToolbarLead>
 
             <ToolbarPills>

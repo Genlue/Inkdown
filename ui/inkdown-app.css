@@ -78,7 +78,17 @@
 
 /* ---------------- 顶栏面包屑 ---------------- */
 
+/* 面包屑装进玻璃胶囊：横向内边距比控件胶囊宽一档，
+   让首尾文字不贴玻璃边缘；外层允许收缩，长路径在 .ink-crumbs-wrap 里截断。 */
+.c-capsule.ink-crumb-capsule {
+  min-width: 0;
+  padding: 0 var(--s-5);
+}
+
 .ink-crumbs-wrap {
+  /* 块级 flex 项的 width:auto 会被撑到可用宽度，胶囊就会拖出一截空白；
+     fit-content 让胶囊只包住路径本身，长路径仍由 max-width 截断。 */
+  width: fit-content;
   min-width: 0;
   max-width: 38vw;
   overflow: hidden;
