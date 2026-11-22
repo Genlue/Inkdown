@@ -106,11 +106,6 @@ fn render_relations(state: AppState) -> AnyView {
     let idx = state.link_index.get();
     let backlinks = find_backlinks(&idx, &path);
     let outlinks = find_outlinks(&idx, &path);
-    let tags = idx
-        .by_path
-        .get(&path)
-        .map(|n| n.tags.clone())
-        .unwrap_or_default();
     let dangling = all_dangling_sorted(&idx);
 
     view! {
@@ -176,35 +171,6 @@ fn render_relations(state: AppState) -> AnyView {
                                     >
                                         <span class="ink-rel__row-title">{o.title}</span>
                                         <span class="ink-rel__row-sub">{sub}</span>
-                                    </button>
-                                }
-                            }).collect_view()}
-                        </div>
-                    }.into_any()
-                }}
-            </section>
-
-            <section class="ink-rel__section">
-                <header class="ink-rel__head">
-                    <span class="ink-rel__label">"本篇标签"</span>
-                    <span class="ink-rel__count">{tags.len()}</span>
-                </header>
-                {if tags.is_empty() {
-                    view! { <div class="ink-rel__empty">"没有 #标签"</div> }.into_any()
-                } else {
-                    view! {
-                        <div class="ink-rel__chips">
-                            {tags.into_iter().map(|t| {
-                                let cnt = idx.tags.get(&t).map(|s| s.len()).unwrap_or(1);
-                                let t_click = t.clone();
-                                view! {
-                                    <button
-                                        type="button"
-                                        class="ink-rel__tag"
-                                        on:click=move |_| state.filter_by_tag(t_click.clone())
-                                    >
-                                        <span>{format!("#{t}")}</span>
-                                        <span class="ink-rel__tag-count">{cnt}</span>
                                     </button>
                                 }
                             }).collect_view()}

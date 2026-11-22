@@ -61,7 +61,6 @@ pub fn AppToolbar() -> impl IntoView {
         match page {
             NavPage::Favorites => vec![Crumb::new(state.vault_name()), Crumb::new("收藏")],
             NavPage::Trash => vec![Crumb::new(state.vault_name()), Crumb::new("回收站")],
-            NavPage::Tag(t) => vec![Crumb::new(state.vault_name()), Crumb::new(format!("#{t}"))],
             _ => vec![Crumb::new(state.vault_name()), Crumb::new("文件")],
         }
     };

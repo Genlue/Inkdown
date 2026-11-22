@@ -19,7 +19,6 @@ pub struct HeadingInfo {
 #[derive(Clone, Debug)]
 pub struct IndexedNote {
     pub title: String,
-    pub tags: Vec<String>,
     pub links: Vec<WikilinkRef>,
     pub headings: Vec<HeadingInfo>,
     pub content: String,
@@ -30,8 +29,6 @@ pub struct LinkIndex {
     pub by_path: BTreeMap<String, IndexedNote>,
     /// target_path -> set of source_paths
     pub backlinks: HashMap<String, BTreeSet<String>>,
-    /// tag -> set of note_paths
-    pub tags: BTreeMap<String, BTreeSet<String>>,
     /// unresolved target -> set of source_paths
     pub unresolved: BTreeMap<String, BTreeSet<String>>,
 }
@@ -48,12 +45,6 @@ pub struct OutlinkItem {
     pub target: String,
     pub path: Option<String>,
     pub title: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TagCount {
-    pub tag: String,
-    pub count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -283,85 +274,6 @@ fn collect_links(text: &str) -> Vec<WikilinkRef> {
     out
 }
 
-fn is_atx_heading_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let leading_spaces = line.len() - trimmed.len();
-    if leading_spaces > 3 {
-        return false;
-    }
-    let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-    if !(1..=6).contains(&hashes) {
-        return false;
-    }
-    trimmed[hashes..]
-        .chars()
-        .next()
-        .map(|c| c.is_whitespace())
-        .unwrap_or(true)
-}
-
-fn is_hex_color(s: &str) -> bool {
-    matches!(s.len(), 3 | 4 | 6 | 8) && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn is_tag_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '-' || c == '/'
-}
-
-fn is_tag_boundary_prev(c: char) -> bool {
-    !(c.is_alphanumeric() || c == '_' || c == '/' || c == '#' || c == '\\')
-}
-
-pub fn extract_tags(markdown: &str) -> Vec<String> {
-    let (_, _, masked) = scan(markdown);
-    collect_tags(&masked)
-}
-
-fn collect_tags(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    if !text.contains('#') {
-        return out;
-    }
-
-    for line in text.split('\n') {
-        if is_atx_heading_line(line) {
-            continue;
-        }
-        let mut iter = line.char_indices().peekable();
-        let mut prev_char: Option<char> = None;
-
-        while let Some((idx, ch)) = iter.next() {
-            if ch == '#' {
-                let boundary_ok = prev_char.map(is_tag_boundary_prev).unwrap_or(true);
-                if boundary_ok {
-                    let rest = &line[idx + 1..];
-                    let tag_len: usize = rest
-                        .chars()
-                        .take_while(|&c| is_tag_char(c))
-                        .map(|c| c.len_utf8())
-                        .sum();
-                    if tag_len > 0 {
-                        let raw_tag = &rest[..tag_len];
-                        let clean = raw_tag.trim_matches(|c| c == '/' || c == '-');
-                        if !clean.is_empty()
-                            && !clean.chars().all(|c| c.is_ascii_digit())
-                            && !is_hex_color(clean)
-                        {
-                            let key = clean.to_lowercase();
-                            if seen.insert(key) {
-                                out.push(clean.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            prev_char = Some(ch);
-        }
-    }
-    out
-}
-
 fn plain_heading(text: &str) -> String {
     let mut s = text.to_string();
     // 去掉行内反引号与格式符，保留纯文本大纲标题
@@ -511,7 +423,6 @@ fn resolve_target(target: &str, lookup: &Lookup) -> Vec<String> {
 pub fn build_index(entries: &[IndexInput]) -> LinkIndex {
     let mut by_path = BTreeMap::new();
     let mut backlinks: HashMap<String, BTreeSet<String>> = HashMap::new();
-    let mut tags: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut unresolved: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
     for entry in entries {
@@ -529,7 +440,6 @@ pub fn build_index(entries: &[IndexInput]) -> LinkIndex {
             path,
             IndexedNote {
                 title,
-                tags: collect_tags(&masked),
                 links: collect_links(&masked),
                 headings: collect_headings(&lines, &fenced),
                 content: entry.content.clone(),
@@ -558,15 +468,11 @@ pub fn build_index(entries: &[IndexInput]) -> LinkIndex {
                 }
             }
         }
-        for tag in &info.tags {
-            tags.entry(tag.clone()).or_default().insert(source.clone());
-        }
     }
 
     LinkIndex {
         by_path,
         backlinks,
-        tags,
         unresolved,
     }
 }
@@ -651,19 +557,6 @@ pub fn find_outlinks(index: &LinkIndex, path: &str) -> Vec<OutlinkItem> {
 pub fn resolve_wikilink_path(index: &LinkIndex, target: &str) -> Option<String> {
     let lookup = build_lookup(&index.by_path);
     resolve_target(target, &lookup).into_iter().next()
-}
-
-pub fn all_tags_sorted(index: &LinkIndex) -> Vec<TagCount> {
-    let mut items: Vec<TagCount> = index
-        .tags
-        .iter()
-        .map(|(tag, set)| TagCount {
-            tag: tag.clone(),
-            count: set.len(),
-        })
-        .collect();
-    items.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.tag.cmp(&b.tag)));
-    items
 }
 
 pub fn all_dangling_sorted(index: &LinkIndex) -> Vec<DanglingLink> {
@@ -751,13 +644,6 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "笔记A");
         assert_eq!(links[0].alias.as_deref(), Some("别名"));
-    }
-
-    #[test]
-    fn extracts_tags_with_cjk_punctuation() {
-        let md = "# 标题不算 #ignored\n标签：#入门 #产品/Inkdown #ff00aa #123\n";
-        let tags = extract_tags(md);
-        assert_eq!(tags, vec!["入门", "产品/Inkdown"]);
     }
 
     #[test]

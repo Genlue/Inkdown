@@ -36,7 +36,6 @@ pub enum NavPage {
     Files,
     Favorites,
     Trash,
-    Tag(String),
     Settings,
 }
 
@@ -1547,13 +1546,6 @@ impl AppState {
         fs.write_binary(&rel, &data_url).await?;
         self.rescan().await;
         Ok(rel)
-    }
-
-    pub fn filter_by_tag(&self, tag: String) {
-        self.nav_page.set(NavPage::Tag(tag));
-        if self.list_hidden.get_untracked() {
-            self.toggle_list();
-        }
     }
 
     pub fn jump_to_line(&self, line: usize) {

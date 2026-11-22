@@ -13,7 +13,12 @@ pub fn TabsBar() -> impl IntoView {
     let drag_path = RwSignal::new(None::<String>);
 
     view! {
-        <div class="ink-tabs-wrap">
+        // 标签栏是窗口的第二条「标题带」：空白处与标签间隙应当能拖窗。
+        // GlassDesign 的 Toolbar 只覆盖第一条，这条是 Inkdown 自己的结构，
+        // 不补 deep 的话整条白底栏都是死区（点哪都不动）。
+        // 标签本身是 role="tab"、右侧是 <button>，Tauri 会先在该层拦下，
+        // 点击、拖拽排序、关闭与新建都不受影响。
+        <div class="ink-tabs-wrap" data-tauri-drag-region="deep">
             <div
                 class="c-documenttabs"
                 role="tablist"

@@ -4,9 +4,7 @@ use glass_design::prelude::*;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::components::icons::ICON_HASH;
 use crate::state::{AppState, ContextMenuKind, ContextMenuState, NavPage};
-use crate::vault::links::all_tags_sorted;
 
 #[component]
 pub fn AppNavSidebar() -> impl IntoView {
@@ -34,11 +32,6 @@ pub fn AppNavSidebar() -> impl IntoView {
         }
     };
 
-    let top_tags = move || {
-        let idx = state.link_index.get();
-        all_tags_sorted(&idx).into_iter().take(12).collect::<Vec<_>>()
-    };
-
     view! {
         <NavColumn>
             <div on:click=open_vault_menu>
@@ -57,7 +50,6 @@ pub fn AppNavSidebar() -> impl IntoView {
                 <NavSection label="知识库" />
                 {move || {
                     let counts = state.counts();
-                    let page = state.nav_page.get();
                     view! {
                         <NavItem
                             icon=IconName::FOLDER_TREE
@@ -95,29 +87,6 @@ pub fn AppNavSidebar() -> impl IntoView {
                                 }
                             })
                         />
-
-                        {(!top_tags().is_empty()).then(|| {
-                            let tags = top_tags();
-                            view! {
-                                <NavSection label="标签" />
-                                {tags.into_iter().map(|tc| {
-                                    let tag_click = tc.tag.clone();
-                                    let tag_sel = tc.tag.clone();
-                                    let label = tc.tag.clone();
-                                    let count = tc.count as u32;
-                                    let selected_now = matches!(&page, NavPage::Tag(t) if t == &tag_sel);
-                                    view! {
-                                        <NavItem
-                                            icon=ICON_HASH
-                                            label=label
-                                            count=count
-                                            selected=selected_now
-                                            on_click=Callback::new(move |_| state.filter_by_tag(tag_click.clone()))
-                                        />
-                                    }
-                                }).collect_view()}
-                            }
-                        })}
                     }
                 }}
 

@@ -6,7 +6,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::components::icons::{ICON_CHEVRONS_UP_DOWN, ICON_CODE, ICON_HASH, ICON_TABLE};
+use crate::components::icons::{ICON_CHEVRONS_UP_DOWN, ICON_CODE, ICON_TABLE};
 use crate::markdown::{plain_excerpt, rel_time};
 use crate::state::{
     AppState, ConfirmDialogKind, ConfirmDialogState, ContextMenuKind, ContextMenuState,
@@ -86,11 +86,6 @@ pub fn FilePane() -> impl IntoView {
     let header_title = move || match state.nav_page.get() {
         NavPage::Favorites => ("收藏".to_string(), state.counts().favorites),
         NavPage::Trash => ("回收站".to_string(), state.counts().trash),
-        NavPage::Tag(t) => {
-            let idx = state.link_index.get();
-            let cnt = idx.tags.get(&t).map(|s| s.len()).unwrap_or(0);
-            (format!("#{t}"), cnt)
-        }
         _ => ("文件".to_string(), state.counts().all),
     };
 
@@ -281,7 +276,6 @@ pub fn FilePane() -> impl IntoView {
                     match state.nav_page.get() {
                         NavPage::Favorites => render_favorites_list(state),
                         NavPage::Trash => render_trash_list(state),
-                        NavPage::Tag(tag) => render_tag_list(state, tag),
                         _ => render_files_tree(state, drag_src, drop_target),
                     }
                 }}
@@ -626,70 +620,6 @@ fn render_favorites_list(state: AppState) -> AnyView {
                     </button>
                 }
             }).collect_view()}
-        </div>
-    }
-    .into_any()
-}
-
-fn render_tag_list(state: AppState, tag: String) -> AnyView {
-    let idx = state.link_index.get();
-    let paths: Vec<String> = idx
-        .tags
-        .get(&tag)
-        .map(|s| s.iter().cloned().collect())
-        .unwrap_or_default();
-
-    view! {
-        <div class="ink-files-body">
-            <div class="ink-tag-banner">
-                <Chip
-                    label=format!("#{tag}")
-                    icon=ICON_HASH
-                    on_remove=Callback::new(move |_| state.nav_page.set(NavPage::Files))
-                />
-            </div>
-            {if paths.is_empty() {
-                view! {
-                    <div class="ink-list__empty">
-                        <Empty
-                            icon=ICON_HASH
-                            title="没有带此标签的笔记"
-                            desc="标签已从笔记中移除"
-                        />
-                    </div>
-                }.into_any()
-            } else {
-                view! {
-                    <div class="ink-note-cards">
-                        {paths.into_iter().filter_map(|p| state.note_at(&p)).map(|note| {
-                            let p = note.path.clone();
-                            let p_sel = note.path.clone();
-                            let dir = dirname(&p);
-                            view! {
-                                <button
-                                    type="button"
-                                    class="ink-note-card"
-                                    data-selected=move || (state.active_tab.get().as_deref() == Some(p_sel.as_str())).then_some("1")
-                                    on:click=move |_| {
-                                        let path = p.clone();
-                                        spawn_local(async move {
-                                            state.open_file(&path, true).await;
-                                        });
-                                    }
-                                >
-                                    <div class="ink-note-card__top">
-                                        <span class="ink-note-card__title">{note.title}</span>
-                                        <span class="ink-note-card__time">{rel_time(note.mtime)}</span>
-                                    </div>
-                                    {(!dir.is_empty()).then(|| view! {
-                                        <div class="ink-note-card__path">{dir}</div>
-                                    })}
-                                </button>
-                            }
-                        }).collect_view()}
-                    </div>
-                }.into_any()
-            }}
         </div>
     }
     .into_any()

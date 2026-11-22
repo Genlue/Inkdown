@@ -471,20 +471,6 @@ pub fn EditorWorkspace() -> impl IntoView {
         }
     };
 
-    // 笔记当前标签
-    let note_tags = move || {
-        let Some(path) = state.editor_path.get() else {
-            return Vec::new();
-        };
-        state
-            .link_index
-            .get()
-            .by_path
-            .get(&path)
-            .map(|n| n.tags.clone())
-            .unwrap_or_default()
-    };
-
     let current_note_info = move || {
         state
             .editor_path
@@ -521,7 +507,6 @@ pub fn EditorWorkspace() -> impl IntoView {
             .as_ref()
             .map(|i| format!("更新于 {} ({})", rel_time(i.mtime), abs_date(i.mtime)))
             .unwrap_or_default();
-        let tags = note_tags();
 
         view! {
             <div class="ink-doc__head">
@@ -621,22 +606,6 @@ pub fn EditorWorkspace() -> impl IntoView {
 
                 <div class="ink-doc__meta">
                     <span class="ink-doc__time">{mtime_label}</span>
-                    {(!tags.is_empty()).then(|| view! {
-                        <div class="ink-doc__tags">
-                            {tags.into_iter().map(|tag| {
-                                let t_click = tag.clone();
-                                view! {
-                                    <button
-                                        type="button"
-                                        class="ink-doc__tag-pill"
-                                        on:click=move |_| state.filter_by_tag(t_click.clone())
-                                    >
-                                        {format!("#{tag}")}
-                                    </button>
-                                }
-                            }).collect_view()}
-                        </div>
-                    })}
                 </div>
             </div>
         }
