@@ -908,7 +908,7 @@ fn render_trash_list(state: AppState) -> AnyView {
                 <Empty
                     icon=IconName::TRASH
                     title="回收站是空的"
-                    desc="移到回收站的笔记会暂存在 .trash/ 目录，可随时恢复"
+                    desc="移到回收站的笔记与文件夹会暂存在 .trash/ 目录，可随时恢复"
                 />
             </div>
         }
@@ -927,7 +927,7 @@ fn render_trash_list(state: AppState) -> AnyView {
                         state.confirm_dialog.set(Some(ConfirmDialogState {
                             kind: ConfirmDialogKind::EmptyTrash,
                             title: "清空回收站？".to_string(),
-                            description: "回收站内的全部笔记将被永久删除，无法恢复。".to_string(),
+                            description: "回收站内的全部条目将被永久删除，文件夹会连同内部内容一起删除，无法恢复。".to_string(),
                             confirm_label: "永久清空".to_string(),
                         }));
                     })
@@ -938,10 +938,17 @@ fn render_trash_list(state: AppState) -> AnyView {
                     let tp_restore = item.path.clone();
                     let tp_del = item.path.clone();
                     let name_del = item.name.clone();
+                    let is_dir = item.is_dir;
                     view! {
                         <div class="ink-trash-card">
                             <div class="ink-note-card__top">
-                                <span class="ink-note-card__title">{item.name}</span>
+                                <span class="ink-note-card__title ink-trash-card__name">
+                                    // 目录条目要看得出来：恢复的是整棵子树，不是一篇笔记
+                                    {is_dir.then(|| view! {
+                                        <Icon name=IconName::FOLDER size=11 />
+                                    })}
+                                    <span class="ink-trash-card__label">{item.name.clone()}</span>
+                                </span>
                                 <span class="ink-note-card__time">{rel_time(item.deleted_at)}</span>
                             </div>
                             <div class="ink-note-card__path">{item.original_path}</div>
@@ -967,7 +974,7 @@ fn render_trash_list(state: AppState) -> AnyView {
                                         state.confirm_dialog.set(Some(ConfirmDialogState {
                                             kind: ConfirmDialogKind::DeleteForever { trash_path: tp_del.clone() },
                                             title: format!("彻底删除「{name_del}」？"),
-                                            description: "此操作将从磁盘永久移除该文件，无法恢复。".to_string(),
+                                            description: "此操作将从磁盘永久移除该条目，文件夹会连同内部全部内容一起删除，无法恢复。".to_string(),
                                             confirm_label: "永久删除".to_string(),
                                         }));
                                     })

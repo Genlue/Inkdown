@@ -14,6 +14,7 @@ use crate::tauri_bridge::{
     copy_to_clipboard, invoke_empty, invoke_empty_unit, is_tauri, listen_tauri_event, reload_page,
     sync_window_theme,
 };
+use crate::update::{Busy, CheckState};
 use crate::vault::fs::{
     basename, dirname, get_file_ext, is_hidden, join_path, list_vaults, now_ms,
     set_active_vault_id, strip_ext, FileType, VaultFs, VaultMeta,
@@ -203,6 +204,11 @@ pub struct AppState {
     pub accent_hex: RwSignal<String>,
     pub glass_level: RwSignal<f32>,
 
+    /// 更新检查结果。放在全局状态里，切到别的页再回来不会丢掉「已是最新」。
+    pub update_state: RwSignal<CheckState>,
+    /// 下载/安装进度；None 表示没有正在进行的更新操作。
+    pub update_busy: RwSignal<Option<Busy>>,
+
     pub history: RwSignal<Vec<String>>,
     pub history_index: RwSignal<usize>,
 
@@ -282,6 +288,8 @@ impl AppState {
             system_fonts: RwSignal::new(Vec::new()),
             accent_hex: RwSignal::new("#0a84ff".to_string()),
             glass_level: RwSignal::new(1.0),
+            update_state: RwSignal::new(CheckState::Idle),
+            update_busy: RwSignal::new(None),
             history: RwSignal::new(Vec::new()),
             history_index: RwSignal::new(0),
             window_focused: RwSignal::new(true),
@@ -469,6 +477,17 @@ impl AppState {
 
                     if is_desktop {
                         state.install_desktop_listeners();
+
+                        // 每天第一次启动的静默更新检查。放到首屏之后、链接索引之外，
+                        // 免得和启动链路抢带宽或推迟可交互时间。
+                        let for_update = state;
+                        let upd_cb = Closure::once_into_js(move || for_update.silent_check_update());
+                        if let Some(w) = web_sys::window() {
+                            let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                                upd_cb.unchecked_ref(),
+                                1800,
+                            );
+                        }
                     }
                 }
                 Err(err) => {
@@ -482,6 +501,26 @@ impl AppState {
 
     fn install_desktop_listeners(self) {
         let state = self;
+        // 安装包下载进度：宿主每收一块就发一次，这里只更新进度条读数
+        listen_tauri_event("update://progress", move |payload| {
+            let received = payload
+                .get("received")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total = payload
+                .get("total")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let Some(mut busy) = state.update_busy.get_untracked() else {
+                return;
+            };
+            busy.received = received;
+            if total > 0 {
+                busy.total = total;
+            }
+            state.update_busy.set(Some(busy));
+        });
+
         listen_tauri_event("vault://fs-change", move |payload| {
             let mut paths: Vec<String> = payload
                 .get("paths")
@@ -1388,19 +1427,31 @@ impl AppState {
         toast("已创建副本");
     }
 
+    /// 删除文件夹 = 整棵子树 rename 进 .trash/，和删笔记同一个回收站。
+    /// 以前这里是 remove_dir_all，删目录等于绕过回收站直接烧掉，
+    /// 误点一次就找不回来；恢复时再按原名搬回去（重名退让成 "名字 2"）。
     pub async fn delete_folder(self, path: String) {
         self.commit_doc().await;
         let Some(fs) = self.vault_fs() else {
             toast("仓库未就绪");
             return;
         };
-        if let Err(err) = fs.remove(&path).await {
+        let trash_path = join_path(TRASH_DIR, &format!("{}-{}", now_ms(), basename(&path)));
+        if let Err(err) = fs.rename(&path, &trash_path).await {
             toast(format!("删除失败：{err}"));
             return;
         }
-        let payload = self.with_vault_mut(|v| (v.forget_path(&path), v.workspace_json()));
-        if let Some((index_json, ws_json)) = payload {
+        let payload = self.with_vault_mut(|v| {
+            v.push_trash_entry(&trash_path, &path, true);
+            (
+                v.forget_path_for_trash(&path),
+                v.trash_json(),
+                v.workspace_json(),
+            )
+        });
+        if let Some((index_json, trash_json, ws_json)) = payload {
             let _ = fs.write(INDEX_PATH, &index_json, None).await;
+            let _ = fs.write(TRASH_PATH, &trash_json, None).await;
             let _ = fs.write(WORKSPACE_PATH, &ws_json, None).await;
         }
         let prefix = format!("{path}/");
@@ -1415,7 +1466,7 @@ impl AppState {
         }
         self.rescan().await;
         self.rebuild_link_index().await;
-        toast("已删除文件夹");
+        toast("已把文件夹移到回收站");
     }
 
     pub async fn restore_trash(self, trash_path: String) {
@@ -1427,7 +1478,7 @@ impl AppState {
             .with_vault(|v| v.trash_entry(&trash_path))
             .flatten()
         else {
-            toast("回收站里找不到这篇笔记");
+            toast("回收站里找不到这条记录");
             return;
         };
 
@@ -1442,15 +1493,23 @@ impl AppState {
         let mut target = entry.original_path.clone();
         match fs.exists(&target).await {
             Ok(true) => {
-                let ext = get_file_ext(&target);
-                let dot_ext = if ext.is_empty() {
-                    ".md".to_string()
+                if entry.is_dir {
+                    // 文件夹没有扩展名可谈，直接在同级里退让出一个不重名的目录名。
+                    let base = basename(&target);
+                    if let Some(unique) = self.with_vault(|v| v.unique_name(&dir, &base, "")) {
+                        target = join_path(&dir, &unique);
+                    }
                 } else {
-                    format!(".{ext}")
-                };
-                let stem = strip_ext(&basename(&target));
-                if let Some(unique) = self.with_vault(|v| v.unique_name(&dir, &stem, &dot_ext)) {
-                    target = join_path(&dir, &format!("{unique}{dot_ext}"));
+                    let ext = get_file_ext(&target);
+                    let dot_ext = if ext.is_empty() {
+                        ".md".to_string()
+                    } else {
+                        format!(".{ext}")
+                    };
+                    let stem = strip_ext(&basename(&target));
+                    if let Some(unique) = self.with_vault(|v| v.unique_name(&dir, &stem, &dot_ext)) {
+                        target = join_path(&dir, &format!("{unique}{dot_ext}"));
+                    }
                 }
             }
             Ok(false) => {}
@@ -1475,9 +1534,12 @@ impl AppState {
             let _ = fs.write(TRASH_PATH, &json, None).await;
         }
         self.rescan().await;
-        self.open_file(&target, true).await;
+        // 恢复目录后没有「打开这篇文档」可做，把它留在文件树里让用户自己点。
+        if !entry.is_dir {
+            self.open_file(&target, true).await;
+        }
         self.rebuild_link_index().await;
-        toast("已恢复笔记");
+        toast(if entry.is_dir { "已恢复文件夹" } else { "已恢复笔记" });
     }
 
     pub async fn delete_forever(self, trash_path: String) {
@@ -1493,12 +1555,18 @@ impl AppState {
             .with_vault(|v| v.trash_entry(&trash_path))
             .flatten();
         let payload = self.with_vault_mut(|v| {
-            if let Some(e) = &entry {
-                v.index.notes.remove(&e.original_path);
-            }
             v.drop_trash(&trash_path);
             v.cache.remove(&trash_path);
-            (v.index_json(), v.trash_json())
+            let index_json = match &entry {
+                // 整棵目录：索引、缓存、目录配色、最近打开里的子树痕迹一起清掉。
+                Some(e) if e.is_dir => v.forget_path(&e.original_path),
+                Some(e) => {
+                    v.index.notes.remove(&e.original_path);
+                    v.index_json()
+                }
+                None => v.index_json(),
+            };
+            (index_json, v.trash_json())
         });
         if let Some((index_json, trash_json)) = payload {
             let _ = fs.write(INDEX_PATH, &index_json, None).await;
@@ -1854,6 +1922,101 @@ impl AppState {
     pub fn set_immersive_keep_ancestors(&self, on: bool) {
         self.immersive_keep_ancestors.set(on);
         self.patch_workspace(|w| w.immersive_keep_ancestors = on);
+    }
+
+    /* ---------------- 更新检查 ---------------- */
+
+    /// 向宿主问最新版本。网络请求在宿主里跑（20 秒超时），这里只负责切换
+    /// 界面状态：检查中 → 已是最新 / 有新版本 / 失败。
+    pub fn check_update(&self) {
+        if self.update_state.get_untracked().is_checking() {
+            return;
+        }
+        self.update_state.set(CheckState::Checking);
+        let state = *self;
+        spawn_local(async move {
+            let next = match crate::update::check().await {
+                Ok(info) if info.has_update => CheckState::Available(info),
+                Ok(info) => CheckState::Latest(info),
+                Err(err) => CheckState::Failed(err),
+            };
+            // 手动查过也算今天的份，别再让开机静默检查重复问一次
+            if !matches!(next, CheckState::Failed(_)) {
+                crate::update::mark_checked();
+            }
+            state.update_state.set(next);
+        });
+    }
+
+    /// 每天第一次启动时静默问一次有没有新版本。
+    ///
+    /// 「静默」指不挡启动、不弹取消按钮、失败也不打扰：查完只在左侧「偏好设置」
+    /// 挂一个「新」角标，真发现新版本才弹一句提示。当天已查过（不论成败）就不再
+    /// 联网，保证一天最多一次请求。
+    pub fn silent_check_update(&self) {
+        if !self.is_desktop || crate::update::checked_today() {
+            return;
+        }
+        crate::update::mark_checked();
+        let state = *self;
+        spawn_local(async move {
+            match crate::update::check().await {
+                Ok(info) if info.has_update => {
+                    let msg = format!("有新版本 v{}，可在「设置 → 关于 Inkdown」更新", info.latest);
+                    state.update_state.set(CheckState::Available(info));
+                    toast(&msg);
+                }
+                Ok(info) => state.update_state.set(CheckState::Latest(info)),
+                // 断网、被墙、GitHub 抽风都不该在界面上留红字，静静跳过
+                Err(_) => {}
+            }
+        });
+    }
+
+    /// 下载并安装更新：宿主把安装包下到 LocalAppData，再拉起安装器并退出应用。
+    /// 成功时应用会直接退出，回不到这里；所以这里只维护进度与失败提示。
+    pub fn install_update(&self) {
+        let CheckState::Available(info) = self.update_state.get_untracked() else {
+            return;
+        };
+        if self.update_busy.get_untracked().is_some() {
+            return;
+        }
+        let Some(url) = info.asset_url.clone() else {
+            toast("这一版没有可下载的安装包，去发行页取");
+            return;
+        };
+        let name = info
+            .asset_name
+            .clone()
+            .unwrap_or_else(|| format!("Inkdown_{}_x64-setup.exe", info.latest));
+        let total = info.asset_size;
+        self.update_busy.set(Some(Busy {
+            stage: "正在下载安装包…".into(),
+            received: 0,
+            total,
+        }));
+
+        let state = *self;
+        spawn_local(async move {
+            match crate::update::download(&url, &name, total).await {
+                Ok(path) => {
+                    state.update_busy.set(Some(Busy {
+                        stage: "正在启动安装程序…".into(),
+                        received: 0,
+                        total: 0,
+                    }));
+                    if let Err(err) = crate::update::install(&path).await {
+                        state.update_busy.set(None);
+                        toast(&format!("启动安装程序失败：{err}"));
+                    }
+                }
+                Err(err) => {
+                    state.update_busy.set(None);
+                    toast(&format!("下载失败：{err}"));
+                }
+            }
+        });
     }
 
     /* ---------------- 多选与批量操作 ---------------- */

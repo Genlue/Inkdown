@@ -8,6 +8,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
+mod update;
+
 /// 当前仓库的根目录。所有文件命令都只接受相对路径。
 struct VaultRoot(Mutex<Option<PathBuf>>);
 
@@ -549,86 +551,99 @@ fn vault_exists(rel: String, state: State<'_, VaultRoot>) -> Result<bool, String
 
 #[tauri::command]
 async fn system_fonts() -> Vec<String> {
-    // Windows 上要起一个 `reg query` 子进程，同步跑同样会冻住窗口主线程
+    // 要读一整棵注册表键，同步跑会冻住窗口主线程
     tauri::async_runtime::spawn_blocking(collect_system_fonts)
         .await
         .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn update_check() -> Result<update::ReleaseInfo, String> {
+    // 最坏要等 20 秒的超时，同样不能留在窗口主线程上
+    tauri::async_runtime::spawn_blocking(|| update::fetch_latest(update::current_version()))
+        .await
+        .map_err(|e| format!("更新检查线程异常：{e}"))?
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProgress {
+    received: u64,
+    total: u64,
+}
+
+/// 安装包放到 LocalAppData，不污染仓库目录。
+fn update_dir() -> Result<PathBuf, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("TEMP").map(PathBuf::from))
+        .ok_or_else(|| "找不到可写的安装包目录".to_string())?;
+    Ok(base.join("Inkdown").join("updates"))
+}
+
+/// 只保留文件名本身，别让调用方用 ../ 把安装包写到别处去。
+fn safe_file_name(raw: &str) -> String {
+    let name = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
+    let cleaned: String = name
+        .chars()
+        .filter(|c| !matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    if cleaned.is_empty() {
+        "inkdown-update-setup.exe".to_string()
+    } else {
+        cleaned
+    }
+}
+
+#[tauri::command]
+async fn update_download(
+    app: AppHandle,
+    url: String,
+    name: String,
+    total: u64,
+) -> Result<String, String> {
+    // 这个命令只用来取自己的发行包，不接受任意地址
+    if !url.starts_with("https://github.com/") {
+        return Err("更新地址不受信任".into());
+    }
+    let name = safe_file_name(&name);
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let dir = update_dir()?;
+        fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败：{e}"))?;
+        let dest = dir.join(&name);
+        update::download(&url, &dest, total, |received, total| {
+            let _ = app.emit("update://progress", UpdateProgress { received, total });
+        })?;
+        Ok(dest.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| format!("下载线程异常：{e}"))?
+}
+
+#[tauri::command]
+fn update_install(app: AppHandle, path: String) -> Result<(), String> {
+    let setup = PathBuf::from(&path);
+    if !setup.is_file() {
+        return Err("安装包不存在，请重新下载".into());
+    }
+    let is_exe = setup
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("exe"))
+        .unwrap_or(false);
+    if !is_exe {
+        return Err("更新包必须是 exe".into());
+    }
+    update::run_installer_then_restart(&setup)?;
+    // 安装脚本会等本进程退出再换文件，这里把窗口让出去
+    app.exit(0);
+    Ok(())
 }
 
 fn collect_system_fonts() -> Vec<String> {
     let mut families = BTreeSet::new();
 
     #[cfg(target_os = "windows")]
-    {
-        if let Ok(output) = std::process::Command::new("reg")
-            .args(["query", "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let line = line.trim();
-                if !line.contains("REG_SZ") {
-                    continue;
-                }
-                let parts: Vec<&str> = line.split("REG_SZ").collect();
-                if parts.is_empty() {
-                    continue;
-                }
-                let mut name = parts[0].trim();
-                if let Some(idx) = name.rfind('(') {
-                    let suffix = &name[idx..];
-                    if suffix.contains("TrueType")
-                        || suffix.contains("OpenType")
-                        || suffix.contains("PostScript")
-                    {
-                        name = name[..idx].trim();
-                    }
-                }
-                let styles = [
-                    " Regular",
-                    " Bold",
-                    " Italic",
-                    " Light",
-                    " Semibold",
-                    " Semi-Bold",
-                    " Black",
-                    " Medium",
-                    " Thin",
-                    " ExtraLight",
-                    " ExtraBold",
-                    " Heavy",
-                    " Oblique",
-                    " Condensed",
-                    " SemiCondensed",
-                    " DemiBold",
-                    " Demibold",
-                ];
-                let mut cleaned = name.to_string();
-                let mut changed = true;
-                while changed {
-                    changed = false;
-                    for style in &styles {
-                        if cleaned.ends_with(style) {
-                            cleaned.truncate(cleaned.len() - style.len());
-                            cleaned = cleaned.trim().to_string();
-                            changed = true;
-                            break;
-                        }
-                    }
-                }
-                if cleaned.contains('&') {
-                    for sub in cleaned.split('&') {
-                        let sub = sub.trim();
-                        if !sub.is_empty() {
-                            families.insert(sub.to_string());
-                        }
-                    }
-                } else if !cleaned.is_empty() {
-                    families.insert(cleaned);
-                }
-            }
-        }
-    }
+    collect_windows_fonts(&mut families);
 
     if families.is_empty() {
         for f in [
@@ -647,6 +662,127 @@ fn collect_system_fonts() -> Vec<String> {
     families.into_iter().collect()
 }
 
+/// 直接读注册表拿字体项。宿主是 GUI 进程，起 reg query 这种控制台子进程会被
+/// Windows 分配一个新的控制台窗口，于是每次启动都闪一下黑框；读注册表没有这个
+/// 副作用，也省掉一次子进程启动。
+#[cfg(target_os = "windows")]
+fn collect_windows_fonts(out: &mut BTreeSet<String>) {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+
+    // 系统装的字体写在 HKLM；「为当前用户安装」的字体只写在 HKCU。
+    const FONTS_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts";
+
+    for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(FONTS_KEY, KEY_READ) else {
+            continue;
+        };
+        for (name, _) in key.enum_values().flatten() {
+            font_families_of(&name, out);
+        }
+    }
+}
+
+/// 把一条注册表字体项的名字拆成字族名写进 out。
+///
+/// 名字形如「微软雅黑 & 微软雅黑 Light (TrueType)」：圆括号里是字体文件类型，
+/// 同一字族的 Regular / Bold / Light 各占一条，& 只是同一文件里的别名。
+/// 界面的字体下拉只想要字族，所以这三类噪声都要剥掉。
+fn font_families_of(raw: &str, out: &mut BTreeSet<String>) {
+    let mut name = raw.trim();
+    if let Some(idx) = name.rfind('(') {
+        let suffix = &name[idx..];
+        if suffix.contains("TrueType") || suffix.contains("OpenType") || suffix.contains("PostScript") {
+            name = name[..idx].trim();
+        }
+    }
+
+    const STYLES: [&str; 17] = [
+        " Regular", " Bold", " Italic", " Light", " Semibold", " Semi-Bold",
+        " Black", " Medium", " Thin", " ExtraLight", " ExtraBold", " Heavy",
+        " Oblique", " Condensed", " SemiCondensed", " DemiBold", " Demibold",
+    ];
+
+    let mut cleaned = name.to_string();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for style in STYLES {
+            if cleaned.ends_with(style) {
+                cleaned.truncate(cleaned.len() - style.len());
+                cleaned = cleaned.trim().to_string();
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    if cleaned.contains('&') {
+        for sub in cleaned.split('&') {
+            let sub = sub.trim();
+            if !sub.is_empty() {
+                out.insert(sub.to_string());
+            }
+        }
+    } else if !cleaned.is_empty() {
+        out.insert(cleaned);
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    fn families(name: &str) -> Vec<String> {
+        let mut out = BTreeSet::new();
+        font_families_of(name, &mut out);
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn strips_file_type_suffix() {
+        assert_eq!(families("Arial (TrueType)"), vec!["Arial"]);
+        assert_eq!(families("Segoe UI (OpenType)"), vec!["Segoe UI"]);
+        // 圆括号里不是字体文件类型就保留：字体名本身可能带括号
+        assert_eq!(families("Some Font (Beta)"), vec!["Some Font (Beta)"]);
+    }
+
+    #[test]
+    fn strips_weight_and_style_words() {
+        assert_eq!(families("Microsoft YaHei Bold (TrueType)"), vec!["Microsoft YaHei"]);
+        assert_eq!(
+            families("Cascadia Code Light Italic (TrueType)"),
+            vec!["Cascadia Code"]
+        );
+    }
+
+    #[test]
+    fn splits_aliases() {
+        assert_eq!(families("微软雅黑 & 微软雅黑 Light (TrueType)"), vec!["微软雅黑"]);
+    }
+
+    #[test]
+    fn drops_empty_names() {
+        assert!(families("").is_empty());
+        assert!(families("   (TrueType)").is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_font_list_looks_sane() {
+        let fonts = collect_system_fonts();
+        assert!(fonts.len() > 20, "系统字体不该只有 {} 个", fonts.len());
+        // 注册表条目名带着文件类型后缀，剥掉之后列表里不该再出现
+        assert!(
+            !fonts.iter().any(|f| f.contains("(TrueType)")),
+            "还留着 (TrueType) 后缀"
+        );
+        for expect in ["Arial", "Consolas"] {
+            assert!(fonts.iter().any(|f| f == expect), "缺少字体 {expect}");
+        }
+    }
+}
+
 #[tauri::command]
 fn open_in_explorer(path: String, state: State<'_, VaultRoot>) -> Result<(), String> {
     let root = root_of(&state)?;
@@ -654,12 +790,17 @@ fn open_in_explorer(path: String, state: State<'_, VaultRoot>) -> Result<(), Str
 
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         use std::process::Command;
+        // explorer 本身是 GUI 程序，不会带出控制台；显式关掉是为了让「子进程一律不留
+        // 窗口」这条规矩在这个函数里也成立，将来换成控制台程序不会又闪一次黑框。
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let win_path = target.to_string_lossy().replace('/', "\\");
         if target.is_file() {
             Command::new("explorer")
                 .arg("/select,")
                 .arg(&win_path)
+                .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
                 .map_err(|e| e.to_string())?;
             return Ok(());
@@ -826,6 +967,9 @@ pub fn run() {
             vault_rename,
             vault_exists,
             system_fonts,
+            update_check,
+            update_download,
+            update_install,
             open_in_explorer,
             open_url,
             window_set_theme,

@@ -356,8 +356,10 @@ fn build_menu_items(state: AppState, kind: &ContextMenuKind) -> Vec<MenuItem> {
                     MenuItem::new("reveal", "在资源管理器中打开").icon(IconName::FOLDER_OPEN),
                 );
             }
+            // 和笔记的「移到回收站」保持一致：都标危险色。
+            // 目录进去的是整棵子树，比单篇笔记更该让用户停一下。
             items.push(
-                MenuItem::new("delete-dir", "删除文件夹")
+                MenuItem::new("delete-dir", "移到回收站")
                     .icon(IconName::TRASH)
                     .danger()
                     .separator_before(),
@@ -521,9 +523,9 @@ fn handle_menu_action(state: AppState, kind: &ContextMenuKind, id: &str) {
                 }
                 "delete-dir" => state.confirm_dialog.set(Some(crate::state::ConfirmDialogState {
                     kind: ConfirmDialogKind::DeleteFolder { path: p.clone() },
-                    title: format!("删除文件夹「{}」？", crate::vault::fs::basename(&p)),
-                    description: "将永久删除此文件夹及其内部的全部文件，无法恢复。".to_string(),
-                    confirm_label: "永久删除".to_string(),
+                    title: format!("把文件夹「{}」移到回收站？", crate::vault::fs::basename(&p)),
+                    description: "文件夹会连同内部全部内容一起进入回收站，可随时恢复。".to_string(),
+                    confirm_label: "移到回收站".to_string(),
                 })),
                 _ => {}
             }

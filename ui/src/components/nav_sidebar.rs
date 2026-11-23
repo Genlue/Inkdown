@@ -5,6 +5,7 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::state::{AppState, ContextMenuKind, ContextMenuState, NavPage};
+use crate::update::CheckState;
 
 #[component]
 pub fn AppNavSidebar() -> impl IntoView {
@@ -91,12 +92,22 @@ pub fn AppNavSidebar() -> impl IntoView {
                 }}
 
                 <NavSection label="系统" />
-                <NavItem
-                    icon=IconName::SLIDERS
-                    label="偏好设置"
-                    selected=Signal::derive(move || matches!(state.nav_page.get(), NavPage::Settings))
-                    on_click=Callback::new(move |_| state.nav_page.set(NavPage::Settings))
-                />
+                // 有新版时挂一个「新」角标：静默检查不弹窗，靠这里提示去哪更新
+                {move || {
+                    let badge = match state.update_state.get() {
+                        CheckState::Available(_) => "新".to_string(),
+                        _ => String::new(),
+                    };
+                    view! {
+                        <NavItem
+                            icon=IconName::SLIDERS
+                            label="偏好设置"
+                            badge=badge
+                            selected=Signal::derive(move || matches!(state.nav_page.get(), NavPage::Settings))
+                            on_click=Callback::new(move |_| state.nav_page.set(NavPage::Settings))
+                        />
+                    }
+                }}
                 <NavItem
                     icon=IconName::KEYBOARD
                     label="快捷键速查"

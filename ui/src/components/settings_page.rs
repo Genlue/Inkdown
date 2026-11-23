@@ -4,6 +4,8 @@ use glass_design::prelude::*;
 use leptos::prelude::*;
 
 use crate::state::{AppState, NavPage};
+use crate::update::{CheckState, ReleaseInfo};
+use wasm_bindgen_futures::spawn_local;
 
 const ACCENT_PRESETS: &[(&str, &str)] = &[
     ("#0a84ff", "海蓝"),
@@ -253,19 +255,41 @@ pub fn SettingsPage() -> impl IntoView {
                                         />
                                     </Row>
                                     <Divider />
-                                    <Row label="沉浸文件夹" hint="开启后只让当前笔记所在目录可读，其余目录名变成色条；文件树顶栏有开关">
-                                        <div class="l-row l-row--0">
-                                            <Switch
-                                                checked=Signal::derive(move || state.immersive_collapse.get())
-                                                on_change=Callback::new(move |v: bool| state.set_immersive_collapse(v))
-                                            />
-                                            <span class="c-caption">"顺带折叠其它目录"</span>
-                                        </div>
+                                    // 这三行各说一件事：第一行是沉浸本身，后两行是它进入时的行为。
+                                    // 以前「沉浸文件夹」这一行右边挂的是「顺带折叠其它目录」的开关，
+                                    // 标签说的是功能、控件改的是子选项，谁也看不出这一行到底改了什么。
+                                    <Row
+                                        label="沉浸文件夹"
+                                        hint="只让当前笔记所在目录可读，其余目录名盖成色条，专注当前这一片；纯视图状态，不改磁盘。文件树顶栏也有同一开关"
+                                    >
+                                        <Switch
+                                            checked=Signal::derive(move || state.immersive.get())
+                                            label="沉浸文件夹"
+                                            on_change=Callback::new(move |on: bool| {
+                                                if on {
+                                                    state.enter_immersive(None);
+                                                } else {
+                                                    state.exit_immersive();
+                                                }
+                                            })
+                                        />
                                     </Row>
                                     <Divider />
-                                    <Row label="保留上级路径" hint="沉浸时仍能看清自己在哪一层目录里">
+                                    <Row
+                                        label="进入时收起其它目录"
+                                        hint="进入沉浸时顺手把无关目录折叠掉；关掉则保持原来的展开状态，只把目录名盖住"
+                                    >
+                                        <Switch
+                                            checked=Signal::derive(move || state.immersive_collapse.get())
+                                            label="进入沉浸时收起其它目录"
+                                            on_change=Callback::new(move |v: bool| state.set_immersive_collapse(v))
+                                        />
+                                    </Row>
+                                    <Divider />
+                                    <Row label="保留上级路径" hint="当前笔记的上级目录名在沉浸时仍可读，方便确认自己在哪一层">
                                         <Switch
                                             checked=Signal::derive(move || state.immersive_keep_ancestors.get())
+                                            label="保留上级路径"
                                             on_change=Callback::new(move |v: bool| state.set_immersive_keep_ancestors(v))
                                         />
                                     </Row>
@@ -378,12 +402,77 @@ pub fn SettingsPage() -> impl IntoView {
                                     </Row>
                                 </Card>
 
-                                // 5. 关于
+                                // 5. 关于与更新
                                 <SectionTitle>"关于 Inkdown"</SectionTitle>
                                 <Card>
-                                    <Row label="版本" hint="Tauri 2 + Leptos CSR + GlassDesign 液态玻璃">
-                                        <Badge label=format!("v{}", env!("CARGO_PKG_VERSION")) variant=BadgeVariant::Neutral />
-                                    </Row>
+                                    // 版本与检查按钮：状态（检查中 / 已是最新 / 有新版本 / 失败）
+                                    // 直接写在这一行的说明里，不用再弹窗告诉用户结果。
+                                    {move || {
+                                        let st = state.update_state.get();
+                                        let busy = state.update_busy.get();
+                                        let hint = match &busy {
+                                            Some(b) => {
+                                                let label = b.label();
+                                                format!("{label}（下载完成后应用会退出并静默安装，装好自动重开）")
+                                            }
+                                            None => st.summary(),
+                                        };
+                                        let checking = st.is_checking();
+                                        let locked = checking || busy.is_some();
+                                        view! {
+                                            <Row label=format!("版本 v{}", env!("CARGO_PKG_VERSION")) hint=hint>
+                                                <Button
+                                                    label=if checking { "检查中…" } else { "检查更新" }
+                                                    icon=IconName::REFRESH_CW
+                                                    size=Size::Sm
+                                                    disabled=locked
+                                                    on_click=Callback::new(move |_| state.check_update())
+                                                />
+                                            </Row>
+                                        }
+                                    }}
+                                    // 只有真发现新版本时才展开这一段，平时不占版面。
+                                    {move || match state.update_state.get() {
+                                        CheckState::Available(info) => {
+                                            let notes = if info.notes.trim().is_empty() {
+                                                "这一版没有写更新说明".to_string()
+                                            } else {
+                                                info.notes.clone()
+                                            };
+                                            let page = info.page_url.clone();
+                                            let hint = new_version_hint(&info);
+                                            let installing = state.update_busy.get().is_some();
+                                            view! {
+                                                <Divider />
+                                                <Row label=format!("新版本 v{}", info.latest) hint=hint>
+                                                    <Cluster>
+                                                        <Button
+                                                            label=if installing { "更新中…" } else { "下载并安装" }
+                                                            icon=IconName::DOWNLOAD
+                                                            size=Size::Sm
+                                                            variant=ButtonVariant::Primary
+                                                            disabled=installing
+                                                            on_click=Callback::new(move |_| state.install_update())
+                                                        />
+                                                        <Button
+                                                            label="发行页"
+                                                            icon=IconName::EXTERNAL_LINK
+                                                            size=Size::Sm
+                                                            on_click=Callback::new(move |_| {
+                                                                let url = page.clone();
+                                                                spawn_local(async move {
+                                                                    crate::tauri_bridge::open_external_url(&url).await;
+                                                                });
+                                                            })
+                                                        />
+                                                    </Cluster>
+                                                </Row>
+                                                <div class="ink-update__notes">{notes}</div>
+                                            }
+                                                .into_any()
+                                        }
+                                        _ => ().into_any(),
+                                    }}
                                     <Divider />
                                     <Row label="数据哲学" hint="纯明文 Markdown 与本地附件，卸载应用后知识库依然完整可读">
                                         <Chip label="本地优先" icon=IconName::SHIELD />
@@ -395,5 +484,26 @@ pub fn SettingsPage() -> impl IntoView {
                 </PageInset>
             </ScrollArea>
         </Page>
+    }
+}
+
+/// 「新版本」那一行的说明：发布时间与安装包大小，没有就不写。
+fn new_version_hint(info: &ReleaseInfo) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(day) = info.published_at.get(..10) {
+        parts.push(format!("发布于 {day}"));
+    }
+    if let Some(name) = &info.asset_name {
+        let size = crate::update::human_size(info.asset_size);
+        parts.push(if size.is_empty() {
+            format!("安装包 {name}")
+        } else {
+            format!("安装包 {name} · {size}")
+        });
+    }
+    if parts.is_empty() {
+        "更新说明见下方".to_string()
+    } else {
+        parts.join(" · ")
     }
 }

@@ -4,6 +4,7 @@ mod components;
 mod markdown;
 mod state;
 mod tauri_bridge;
+mod update;
 mod vault;
 
 use glass_design::prelude::*;

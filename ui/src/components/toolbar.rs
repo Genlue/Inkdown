@@ -26,6 +26,22 @@ pub fn AppToolbar() -> impl IntoView {
     let view_value = Signal::derive(move || state.view_mode.get());
     let set_view_mode = Callback::new(move |m: String| state.set_view_mode(m));
 
+    // 主题与设置页共用同一套三档值。顶栏原来只有一颗「深浅互换」的按钮，
+    // 一旦切到 System 就再也没有入口能切回去，界面上等于缺了「跟随系统」这一档。
+    let theme_options = StoredValue::new_local(vec![
+        SegmentedOption::new("light", "")
+            .icon(IconName::SUN)
+            .title("浅色"),
+        SegmentedOption::new("dark", "")
+            .icon(IconName::MOON)
+            .title("深色"),
+        SegmentedOption::new("system", "")
+            .icon(IconName::MONITOR)
+            .title("跟随系统"),
+    ]);
+    let theme_value = Signal::derive(move || theme.mode.get().as_str().to_string());
+    let set_theme_mode = Callback::new(move |m: String| state.set_theme_mode(theme, &m));
+
     let active_is_markdown = move || {
         let on_settings = matches!(state.nav_page.get(), NavPage::Settings);
         if on_settings {
@@ -184,28 +200,13 @@ pub fn AppToolbar() -> impl IntoView {
                     }}
                 </Capsule>
 
-                <Capsule class="c-capsule--circle">
-                    {move || {
-                        let mode = theme.mode.get();
-                        let is_dark = match mode {
-                            ThemeMode::Dark => true,
-                            ThemeMode::Light => false,
-                            ThemeMode::System => web_sys::window()
-                                .and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
-                                .map(|mq| mq.matches())
-                                .unwrap_or(false),
-                        };
-                        view! {
-                            <IconButton
-                                icon=if is_dark { IconName::SUN } else { IconName::MOON }
-                                label=if is_dark { "切换到浅色主题" } else { "切换到深色主题" }
-                                on_click=Callback::new(move |_| {
-                                    let next = if is_dark { "light" } else { "dark" };
-                                    state.set_theme_mode(theme, next);
-                                })
-                            />
-                        }
-                    }}
+                <Capsule>
+                    <Segmented
+                        options=theme_options.get_value()
+                        value=theme_value
+                        label="主题模式"
+                        on_change=set_theme_mode
+                    />
                 </Capsule>
 
                 <Capsule class="c-capsule--circle">

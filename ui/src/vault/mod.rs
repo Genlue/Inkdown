@@ -419,6 +419,10 @@ pub struct TrashEntry {
     pub name: String,
     #[serde(rename = "deletedAt")]
     pub deleted_at: u64,
+    /// 整棵目录进回收站时置真：恢复不能补扩展名、也不该自动打开。
+    /// 老的 trash.json 没有这个键，缺省按文件处理。
+    #[serde(default, rename = "isDir")]
+    pub is_dir: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1123,6 +1127,24 @@ impl Vault {
         self.index_json()
     }
 
+    /// 移到回收站时用：清掉路径留下的索引、缓存与工作区痕迹，
+    /// 但保留目录配色——回收站里的条目还等着原样恢复，配色该跟着回来。
+    pub fn forget_path_for_trash(&mut self, path: &str) -> String {
+        let prefix = format!("{path}/");
+        self.index
+            .notes
+            .retain(|k, _| k != path && !k.starts_with(&prefix));
+        self.cache
+            .retain(|k, _| k != path && !k.starts_with(&prefix));
+        self.workspace
+            .recents
+            .retain(|p| p != path && !p.starts_with(&prefix));
+        self.workspace
+            .open_tabs
+            .retain(|p| p != path && !p.starts_with(&prefix));
+        self.index_json()
+    }
+
     /// 删掉一个文件（或整棵子树）留下的索引、缓存与工作区痕迹。
     pub fn forget_path(&mut self, path: &str) -> String {
         let prefix = format!("{path}/");
@@ -1159,20 +1181,46 @@ impl Vault {
         fav
     }
 
+    /// 回收站里显示的名字：文件剥扩展名，目录原样保留
+    /// （"v1.0" 这种目录名里的点不是扩展名，切掉就再也叫不回去了）。
+    fn trash_display_name(original_path: &str, is_dir: bool) -> String {
+        let name = basename(original_path);
+        if is_dir {
+            name
+        } else {
+            strip_ext(&name)
+        }
+    }
+
     /// 登记一条回收站记录，缓存跟着挪到回收站路径。
     pub fn push_trash(&mut self, trash_path: &str, original_path: &str) {
-        let name = basename(original_path);
+        self.push_trash_entry(trash_path, original_path, false);
+    }
+
+    /// 文件夹也走回收站：整棵子树挪过去，名字不剥扩展名
+    /// （"v1.0" 是名字不是扩展名），子树里的缓存、最近打开与页签一并清掉。
+    pub fn push_trash_entry(&mut self, trash_path: &str, original_path: &str, is_dir: bool) {
         self.trash.push(TrashEntry {
             path: trash_path.to_string(),
             original_path: original_path.to_string(),
-            name: strip_ext(&name),
+            name: Self::trash_display_name(original_path, is_dir),
             deleted_at: now_ms(),
+            is_dir,
         });
-        if let Some(cached) = self.cache.remove(original_path) {
+        if is_dir {
+            let prefix = format!("{original_path}/");
+            self.cache
+                .retain(|k, _| k != original_path && !k.starts_with(&prefix));
+        } else if let Some(cached) = self.cache.remove(original_path) {
             self.cache.insert(trash_path.to_string(), cached);
         }
-        self.workspace.recents.retain(|p| p != original_path);
-        self.workspace.open_tabs.retain(|p| p != original_path);
+        let prefix = format!("{original_path}/");
+        self.workspace
+            .recents
+            .retain(|p| p != original_path && !p.starts_with(&prefix));
+        self.workspace
+            .open_tabs
+            .retain(|p| p != original_path && !p.starts_with(&prefix));
     }
 
     pub fn trash_entry(&self, trash_path: &str) -> Option<TrashEntry> {
@@ -1187,8 +1235,13 @@ impl Vault {
     pub fn drain_trash(&mut self) -> Vec<TrashEntry> {
         let items: Vec<TrashEntry> = self.trash.drain(..).collect();
         for item in &items {
-            self.index.notes.remove(&item.original_path);
-            self.cache.remove(&item.path);
+            if item.is_dir {
+                // 目录要连子树一起忘：索引、配色、最近打开都不能留下指向空路径的条目
+                self.forget_path(&item.original_path);
+            } else {
+                self.index.notes.remove(&item.original_path);
+                self.cache.remove(&item.path);
+            }
         }
         items
     }
@@ -1338,6 +1391,37 @@ mod plan_tests {
             Some("Notes/b.md")
         );
         assert!(vault.plan_rename_note("Notes/a.md", "  ").is_err());
+    }
+
+    #[test]
+    fn trash_name_keeps_dots_for_folders() {
+        // 目录名里的点不是扩展名：撤销删除时要原样叫回 "d.v2"
+        assert_eq!(Vault::trash_display_name("d.v2", true), "d.v2");
+        assert_eq!(Vault::trash_display_name("Notes", true), "Notes");
+        // 文件仍然剥扩展名，别为了目录改坏老行为
+        assert_eq!(Vault::trash_display_name("d.v2/a.md", false), "a");
+    }
+
+    #[test]
+    fn forget_path_for_trash_clears_subtree_but_keeps_color() {
+        let mut vault = vault_with(&[("d", "dir"), ("d/a.md", "file")]);
+        vault.cache.insert("d/a.md".into(), "正文".into());
+        vault.workspace.open_tabs = vec!["d/a.md".into(), "x.md".into()];
+        vault.workspace.recents = vec!["d/a.md".into()];
+        vault.settings.folder_colors.insert("d".into(), "amber".into());
+
+        vault.forget_path_for_trash("d");
+
+        // 子树里的缓存、最近打开与页签要跟着消失，否则留下指向空路径的脏状态
+        assert!(vault.cache.get("d/a.md").is_none());
+        assert_eq!(vault.workspace.open_tabs, vec!["x.md".to_string()]);
+        assert!(vault.workspace.recents.is_empty());
+        // 配色要留着：回收站里的目录还等着原样恢复
+        assert!(vault.settings.folder_colors.contains_key("d"));
+
+        // 只有永久删除才连配色一起忘
+        vault.forget_path("d");
+        assert!(!vault.settings.folder_colors.contains_key("d"));
     }
 
     #[test]
